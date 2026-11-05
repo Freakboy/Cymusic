@@ -4,6 +4,7 @@ import { formatSingerName } from '@/components/utils/musicSdk/utils'
 import { httpFetch } from '@/components/utils/request'
 import { fakeAudioMp3Uri } from '@/constants/images'
 import { getSingerInfo } from '@/helpers/userApi/qq-music-api'
+import i18n from '@/locales/commentsFeature'
 import axios from 'axios'
 import { Alert } from 'react-native'
 import { logError, logInfo } from '../logger'
@@ -121,6 +122,15 @@ const parseResponse = async (response) => {
 
 export const myGetLyric = async (musicItem) => {
 	try {
+		if (musicItem.platform === 'Netease') {
+			const response = await fetch(`https://music.163.com/api/song/lyric?id=${encodeURIComponent(musicItem.id)}&lv=1&kv=1&tv=-1`)
+			if (!response.ok) throw new Error('Get Netease lyric failed')
+			const data = await response.json()
+			return {
+				lyric: typeof data?.lrc?.lyric === 'string' && data.lrc.lyric ? data.lrc.lyric : `[00:00.00]${i18n.t('commentsFeature.noLyrics')}`,
+				tlyric: typeof data?.tlyric?.lyric === 'string' ? data.tlyric.lyric : '',
+			}
+		}
 		const requestObj = httpFetch(
 			`https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=${musicItem.id}&g_tk=5381&loginUin=0&hostUin=0&format=json&inCharset=utf8&outCharset=utf-8&platform=yqq`,
 			{
@@ -135,14 +145,20 @@ export const myGetLyric = async (musicItem) => {
 			throw new Error('Get lyric failed')
 		}
 
-		return {
-			lyric: decodeName(b64DecodeUnicode(body.lyric)),
-			tlyric: decodeName(b64DecodeUnicode(body.trans)),
+		const lyric = decodeName(b64DecodeUnicode(body.lyric))
+		let tlyric = ''
+		try {
+			if (typeof body.trans === 'string' && body.trans) {
+				tlyric = decodeName(b64DecodeUnicode(body.trans))
+			}
+		} catch (error) {
+			logError('Error decoding lyric translation:', error)
 		}
+		return { lyric, tlyric }
 	} catch (error) {
 		logError('Error fetching lyrics:', error)
 		return {
-			lyric: '[00:00.00]暂无歌词',
+			lyric: `[00:00.00]${i18n.t('commentsFeature.noLyrics')}`,
 			tlyric: '',
 		}
 	}
@@ -352,6 +368,7 @@ export async function getPlayListFromQ(playListID: string) {
 			title: item.title || 'Untitled Song',
 			album: item.album?.name || 'Unknown Album',
 			id: item.mid || 'default_songmid',
+			platform: 'QQ',
 			artwork:
 				item.album?.name === '' || item.album?.name === '空'
 					? item.singer?.length
@@ -374,7 +391,7 @@ export async function getPlayListFromQ(playListID: string) {
 			artist: data.data.cdlist[0].nickname,
 			name: data.data.cdlist[0].dissname,
 			artwork: artwork,
-			title: data.data.cdlist[0].desc,
+			title: data.data.cdlist[0].dissname,
 			songs: formattedSongs,
 		}
 	} catch (error) {

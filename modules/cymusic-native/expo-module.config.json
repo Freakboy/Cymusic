@@ -6,7 +6,8 @@
 			"CyMusicSourceModule",
 			"CyMusicVolumeModule",
 			"CyMusicRequestTasksModule",
-			"CyMusicSleepTimerModule"
+			"CyMusicSleepTimerModule",
+			"CyMusicNowPlayingModule"
 		]
 	}
 }

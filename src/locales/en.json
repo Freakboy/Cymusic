@@ -14,7 +14,10 @@
 			"clearCache": "Clear Cache",
 			"viewLogs": "View Logs",
 			"clearPlaylist": "Clear Playlist",
-			"autoCacheLocal": "Auto Cache Songs Locally",
+		"autoCacheLocal": "Auto Cache Songs Locally",
+		"preloadNextTrack": "Pre-cache Next Track",
+		"bluetoothLyrics": "Bluetooth Lyrics (Compatibility)",
+		"sourceManagement": "Music Sources",
 			"preciseSeeking": "Precise seeking",
 			"switchSource": "Switch Source",
 			"selectSource": "Select Source",
@@ -33,6 +36,7 @@
 			"songsNumsToLoad": "Songs Nums to Load"
 		},
 		"descriptions": {
+			"bluetoothLyrics": "Append the current lyric to the system track title, including Lock Screen and CarPlay. Off by default; accessory support varies.",
 			"preciseSeeking": "Helps keep audio and lyrics aligned after seeking in some FLAC files. Playback may wait for the full audio file to load. Applies after changing tracks."
 		},
 		"actions": {
@@ -41,7 +45,7 @@
 				"fromFile": "Import from File",
 				"fromUrl": "Import from URL"
 			},
-			"autoCacheLocal": {
+		"autoCacheLocal": {
 				"yes": "Yes",
 				"no": "No"
 			},
@@ -80,6 +84,10 @@
 				"delete": "Delete",
 				"selectDelete": "Select Delete"
 			}
+		},
+		"preloadNextTrack": {
+			"yes": "On",
+			"no": "Off"
 		},
 		"placeholders": {
 			"enterSourceUrl": "Please enter the source URL"
@@ -143,6 +151,10 @@
 		"addToPlaylist": "Add to Playlist",
 		"showLyrics": "Show Lyrics",
 		"showAlbum": "Show Album",
+		"showComments": "View Comments",
+		"showTranslation": "Show Translation",
+		"lyricFontSize": "Lyric Font Size",
+		"lyricMode": { "original": "Original", "bilingual": "Bilingual", "translation": "Translation Only" },
 		"like": "Like",
 		"cancel": "Cancel",
 		"confirm": "Confirm",

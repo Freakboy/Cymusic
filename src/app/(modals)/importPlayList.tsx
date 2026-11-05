@@ -1,15 +1,23 @@
 import { unknownTrackImageUri } from '@/constants/images'
 import { ThemeColors, screenPadding } from '@/constants/tokens'
 import { logError } from '@/helpers/logger'
+import { importRemotePlaylist, type PlaylistImportMode } from '@/helpers/remotePlaylistStore'
 import myTrackPlayer from '@/helpers/trackPlayerIndex'
-import { getPlayListFromQ } from '@/helpers/userApi/getMusicSource'
+import {
+	fetchRemotePlaylistFromInput,
+	findBoundPlaylist,
+	parseRemotePlaylistReference,
+	type RemotePlaylistPlatform,
+	type RemotePlaylistResult,
+} from '@/helpers/userApi/remotePlaylist'
 import { useThemeColors } from '@/hooks/useAppTheme'
+import { usePlaylistFeatureText } from '@/locales/playlistFeature'
+import { playListsStore } from '@/player/PlayerStore'
 import { useDefaultStyles } from '@/styles'
-import { Ionicons } from '@expo/vector-icons'
-import { useHeaderHeight } from 'expo-router/react-navigation'
 import * as ImagePicker from 'expo-image-picker'
 import { router } from 'expo-router'
-import React, { useMemo, useRef, useState } from 'react'
+import { useHeaderHeight } from 'expo-router/react-navigation'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
 	ActivityIndicator,
 	Image,
@@ -28,355 +36,373 @@ const ImportPlayList = () => {
 	const colors = useThemeColors()
 	const defaultStyles = useDefaultStyles()
 	const styles = useMemo(() => createStyles(colors, defaultStyles), [colors, defaultStyles])
+	const text = usePlaylistFeatureText()
+	const playlists = playListsStore.useValue() || []
+	const [action, setAction] = useState<'create' | 'import'>('import')
 	const [playlistUrl, setPlaylistUrl] = useState('')
-	const [playlistData, setPlaylistData] = useState(null)
+	const [preview, setPreview] = useState<RemotePlaylistResult | null>(null)
 	const [isLoading, setIsLoading] = useState(false)
-	const [error, setError] = useState(null)
+	const [isSaving, setIsSaving] = useState(false)
+	const [error, setError] = useState<string | null>(null)
 	const [customName, setCustomName] = useState('')
-	const [coverImage, setCoverImage] = useState(null)
-
-	const nameInputRef = useRef(null)
-	const urlInputRef = useRef(null)
-
+	const [coverImage, setCoverImage] = useState<string | undefined>()
+	const [importMode, setImportMode] = useState<PlaylistImportMode>('update')
+	const [platform, setPlatform] = useState<RemotePlaylistPlatform | undefined>()
+	const requestId = useRef(0)
+	const busy = useRef(false)
+	const saving = useRef(false)
 	const headerHeight = useHeaderHeight()
-	const { top } = useSafeAreaInsets()
+	const insets = useSafeAreaInsets()
+	const existing = preview ? findBoundPlaylist(playlists, preview.remoteBinding) : undefined
 
-	const pickImage = async () => {
-		const result = await ImagePicker.launchImageLibraryAsync({
-			mediaTypes: ImagePicker.MediaTypeOptions.Images,
-			allowsEditing: true,
-			aspect: [1, 1],
-			quality: 1,
-		})
-
-		if (!result.canceled) {
-			setCoverImage(result.assets[0].uri)
-		}
-	}
-
-	const handleCreatePlaylist = async () => {
-		if (!customName.trim()) {
-			setError('请输入歌单名称')
-			return
-		}
-		setIsLoading(true)
-		setError(null)
-		console.log('coverImage', coverImage)
-		try {
-			const newPlaylist = {
-				id: Date.now().toString(),
-				platform: 'QQ',
-				artist: '未知歌手',
-				name: customName.trim(),
-				title: customName.trim(),
-				songs: [],
-				artwork: coverImage || unknownTrackImageUri,
-				tracks: [],
-			}
-			await myTrackPlayer.addPlayLists(newPlaylist as IMusic.PlayList)
-			router.dismiss()
-		} catch (err) {
-			setError('创建失败，请重试')
-			logError('创建错误:', err)
-		} finally {
-			setIsLoading(false)
-		}
-	}
-
-	const handleImport = async () => {
-		setIsLoading(true)
-		setError(null)
-		try {
-			if (!playlistUrl.includes('id=')) throw new Error('链接格式不正确')
-			if (!playlistUrl) throw new Error('链接不能为空')
-			// 发起实际的网络请求
-			const match = playlistUrl.match(/[?&]id=(\d+)/)
-			const response = await getPlayListFromQ(match ? match[1] : null)
-			// 设置数据
-			// console.log(JSON.stringify(response) + '12312312')
-			const processedResponse: any = {
-				...response,
-				title: response.title || response.name || '未知歌单', // 如果 title 为空，使用 name
-			}
-			setPlaylistData(processedResponse)
-			myTrackPlayer.addPlayLists(processedResponse as IMusic.PlayList)
-			router.dismiss()
-		} catch (err) {
-			setError('导入失败，请检查链接是否正确')
-			// myTrackPlayer.deletePlayLists('7570659434')
-			logError('导入错误:', err)
-		} finally {
-			setIsLoading(false)
-		}
-	}
-
-	const DismissPlayerSymbol = () => (
-		<View style={[styles.dismissSymbol, { top: top - 25 }]}>
-			<View style={styles.dismissBar} />
-		</View>
+	useEffect(
+		() => () => {
+			requestId.current++
+		},
+		[],
 	)
 
+	const invalidate = () => {
+		requestId.current++
+		busy.current = false
+		setIsLoading(false)
+		setPreview(null)
+		setError(null)
+		setImportMode('update')
+	}
+
+	const pickImage = async () => {
+		const current = requestId.current
+		try {
+			const result = await ImagePicker.launchImageLibraryAsync({
+				mediaTypes: ['images'],
+				allowsEditing: true,
+				aspect: [1, 1],
+				quality: 1,
+			})
+			if (current === requestId.current && !result.canceled) setCoverImage(result.assets[0].uri)
+		} catch (err) {
+			if (current === requestId.current) setError(text.coverFailed)
+			logError('Playlist cover:', err)
+		}
+	}
+
+	const handlePreview = async () => {
+		if (busy.current || saving.current) return
+		invalidate()
+		if (/^\d+$/.test(playlistUrl.trim()) && !platform) {
+			setError(text.choosePlatform)
+			return
+		}
+		if (!parseRemotePlaylistReference(playlistUrl, platform)) {
+			setError(text.invalidLink)
+			return
+		}
+		const current = requestId.current
+		busy.current = true
+		setIsLoading(true)
+		try {
+			const response = await fetchRemotePlaylistFromInput(playlistUrl, platform)
+			if (current === requestId.current) setPreview(response)
+		} catch (err) {
+			if (current === requestId.current) setError(text.importFailed)
+			logError('Playlist preview:', err)
+		} finally {
+			if (current === requestId.current) {
+				busy.current = false
+				setIsLoading(false)
+			}
+		}
+	}
+
+	const handleSave = async () => {
+		if (saving.current || busy.current) return
+		if (action === 'create' && !customName.trim()) {
+			setError(text.nameRequired)
+			return
+		}
+		if (action === 'import' && !preview) return
+		saving.current = true
+		setIsSaving(true)
+		setError(null)
+		const current = requestId.current
+		try {
+			if (action === 'create') {
+				await myTrackPlayer.addPlayLists({
+					id: Date.now().toString(),
+					platform: 'local',
+					artist: text.unknownArtist,
+					name: customName.trim(),
+					title: customName.trim(),
+					songs: [],
+					artwork: coverImage || unknownTrackImageUri,
+					tracks: [],
+				} as IMusic.PlayList)
+			} else if (preview) {
+				importRemotePlaylist(preview, importMode, { name: customName, artwork: coverImage })
+			}
+			if (current === requestId.current) router.dismiss()
+		} catch (err) {
+			if (current === requestId.current) setError(text.saveFailed)
+			logError('Playlist save:', err)
+		} finally {
+			saving.current = false
+			if (current === requestId.current) setIsSaving(false)
+		}
+	}
+
 	return (
-		<SafeAreaView style={[styles.modalContainer, { paddingTop: headerHeight }]}>
-			<DismissPlayerSymbol />
+		<SafeAreaView
+			edges={['left', 'right', 'bottom']}
+			style={[styles.container, { paddingTop: Math.max(headerHeight, insets.top, 16) }]}
+		>
 			<KeyboardAvoidingView
 				behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-				style={{ flex: 1 }}
+				style={styles.flex}
 			>
-				<ScrollView
-					showsVerticalScrollIndicator={false}
-					contentContainerStyle={{ flexGrow: 1 }}
-					keyboardShouldPersistTaps="handled"
-				>
-					<Text style={styles.header}>导入/创建歌单</Text>
+				<ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+					<Text style={styles.header}>{text.title}</Text>
+					<View style={styles.row}>
+						{(['create', 'import'] as const).map((item) => (
+							<TouchableOpacity
+								key={item}
+								accessibilityRole="button"
+								accessibilityState={{ selected: action === item }}
+								disabled={isSaving}
+								style={[styles.choice, action === item && styles.selected]}
+								onPress={() => {
+									if (action === item) return
+									invalidate()
+									setAction(item)
+									setCustomName('')
+									setCoverImage(undefined)
+								}}
+							>
+								<Text style={[styles.choiceText, action === item && styles.selectedText]}>
+									{text[item]}
+								</Text>
+							</TouchableOpacity>
+						))}
+					</View>
 
-					<View style={styles.section}>
-						<Text style={styles.sectionTitle}>创建新歌单</Text>
-						<View style={styles.createPlaylistCard}>
-							<View style={styles.createPlaylistContainer}>
-								<View style={styles.coverContainer}>
-									<TouchableOpacity onPress={pickImage} style={styles.coverPicker}>
-										{coverImage ? (
-											<Image source={{ uri: coverImage }} style={styles.coverImage} />
-										) : (
-											<View style={styles.coverPlaceholder}>
-												<Ionicons name="image-outline" size={24} color={colors.primary} />
-												<Text style={styles.coverText}>选择封面</Text>
-											</View>
-										)}
+					{action === 'import' && (
+						<View style={styles.section}>
+							<Text style={styles.label}>{text.source}</Text>
+							<View style={styles.row}>
+								{([undefined, 'QQ', 'Netease'] as const).map((item) => (
+									<TouchableOpacity
+										key={item || 'auto'}
+										accessibilityRole="button"
+										accessibilityState={{ selected: platform === item }}
+										disabled={isSaving}
+										style={[styles.choice, platform === item && styles.selected]}
+										onPress={() => {
+											invalidate()
+											setPlatform(item)
+										}}
+									>
+										<Text style={[styles.choiceText, platform === item && styles.selectedText]}>
+											{item ? text[item] : text.auto}
+										</Text>
 									</TouchableOpacity>
-								</View>
-
-								<View style={styles.playlistInfoContainer}>
-									<View style={[styles.inputContainer, { marginBottom: 0 }]}>
-										<TextInput
-											ref={nameInputRef}
-											style={styles.input}
-											value={customName}
-											onChangeText={setCustomName}
-											placeholder="输入歌单名称"
-											placeholderTextColor={colors.placeholder}
-											autoCapitalize="none"
-											autoCorrect={false}
-											keyboardType="default"
-											returnKeyType="done"
-											blurOnSubmit={true}
-											onSubmitEditing={() => nameInputRef.current?.blur()}
-											enablesReturnKeyAutomatically={true}
-											clearButtonMode="while-editing"
-										/>
-									</View>
-								</View>
+								))}
 							</View>
-
+							<TextInput
+								style={styles.input}
+								value={playlistUrl}
+								editable={!isSaving}
+								onChangeText={(value) => {
+									invalidate()
+									setPlaylistUrl(value)
+								}}
+								placeholder={text.linkPlaceholder}
+								accessibilityLabel={text.linkPlaceholder}
+								placeholderTextColor={colors.placeholder}
+								autoCapitalize="none"
+								autoCorrect={false}
+								keyboardType="url"
+								returnKeyType="done"
+								onSubmitEditing={handlePreview}
+							/>
+							<Text style={styles.hint}>{text.idHint}</Text>
 							<TouchableOpacity
-								onPress={handleCreatePlaylist}
-								activeOpacity={0.8}
+								accessibilityRole="button"
 								style={styles.button}
-								disabled={isLoading}
+								disabled={isLoading || isSaving}
+								onPress={handlePreview}
 							>
-								{isLoading ? (
-									<ActivityIndicator color={colors.loading} />
-								) : (
-									<>
-										<Ionicons name="add-circle-outline" size={24} color={colors.primary} />
-										<Text style={styles.buttonText}>创建歌单</Text>
-									</>
-								)}
+								{isLoading && <ActivityIndicator color={colors.primary} />}
+								<Text style={styles.buttonText}>
+									{isLoading ? text.recognizing : error && !preview ? text.retry : text.preview}
+								</Text>
 							</TouchableOpacity>
 						</View>
-					</View>
-
-					<View style={styles.divider} />
-
-					<View style={styles.section}>
-						<Text style={styles.sectionTitle}>导入已有歌单</Text>
-						<View style={styles.createPlaylistCard}>
-							<View style={styles.importContainer}>
-								<TextInput
-									ref={urlInputRef}
-									style={styles.input}
-									value={playlistUrl}
-									onChangeText={setPlaylistUrl}
-									placeholder='🔗输入企鹅音乐歌单链接要有"id="字样'
-									placeholderTextColor={colors.placeholder}
-									autoCapitalize="none"
-									autoCorrect={false}
-									keyboardType="url"
-									returnKeyType="done"
-									blurOnSubmit={true}
-									onSubmitEditing={() => urlInputRef.current?.blur()}
-									enablesReturnKeyAutomatically={true}
-									clearButtonMode="while-editing"
-								/>
-							</View>
-
-							<TouchableOpacity
-								onPress={handleImport}
-								activeOpacity={0.8}
-								style={styles.button}
-								disabled={isLoading}
-							>
-								{isLoading ? (
-									<ActivityIndicator color={colors.loading} />
-								) : (
-									<>
-										<Ionicons name="cloud-download-outline" size={24} color={colors.primary} />
-										<Text style={styles.buttonText}>导入歌单</Text>
-									</>
-								)}
-							</TouchableOpacity>
-						</View>
-					</View>
-
-					{error && <Text style={styles.error}>{error}</Text>}
-					{playlistData && (
-						<Text style={styles.successText}>导入成功! 歌单名称: {playlistData.name}</Text>
 					)}
+
+					{preview && action === 'import' && (
+						<View style={styles.section}>
+							<Text style={styles.label}>{text.previewTitle}</Text>
+							<View style={styles.previewRow}>
+								<Image
+									source={{ uri: preview.artwork || unknownTrackImageUri }}
+									style={styles.cover}
+									accessibilityLabel={text.cover}
+								/>
+								<View style={styles.flex}>
+									<Text style={styles.label}>{preview.name}</Text>
+									<Text style={styles.hint}>
+										{text[preview.remoteBinding.platform]} · {preview.songs.length} {text.songs}
+									</Text>
+								</View>
+							</View>
+							<Text style={styles.hint}>
+								{existing ? `${text.exists}: ${existing.name}` : text.newPlaylist}
+							</Text>
+							{existing && (
+								<View style={styles.row}>
+									{(['update', 'copy', 'merge'] as const).map((mode) => (
+										<TouchableOpacity
+											key={mode}
+											accessibilityRole="button"
+											accessibilityState={{ selected: importMode === mode }}
+											disabled={isSaving}
+											onPress={() => {
+												requestId.current++
+												setImportMode(mode)
+												setError(null)
+											}}
+											style={[styles.choice, importMode === mode && styles.selected]}
+										>
+											<Text style={[styles.choiceText, importMode === mode && styles.selectedText]}>
+												{text[mode]}
+											</Text>
+										</TouchableOpacity>
+									))}
+								</View>
+							)}
+							<Text style={styles.hint}>
+								{existing ? text[`${importMode}Hint`] : text.refreshHint}
+							</Text>
+						</View>
+					)}
+
+					{(action === 'create' || preview) && (
+						<View style={styles.section}>
+							<Text style={styles.label}>
+								{action === 'create' ? text.details : text.customize}
+							</Text>
+							<TouchableOpacity
+								accessibilityRole="button"
+								accessibilityLabel={text.chooseCover}
+								disabled={isSaving}
+								onPress={pickImage}
+								style={styles.coverPicker}
+							>
+								{coverImage ? (
+									<Image source={{ uri: coverImage }} style={styles.cover} />
+								) : (
+									<Text style={styles.buttonText}>{text.chooseCover}</Text>
+								)}
+							</TouchableOpacity>
+							<TextInput
+								style={styles.input}
+								value={customName}
+								onChangeText={setCustomName}
+								editable={!isSaving}
+								placeholder={action === 'create' ? text.name : text.optionalName}
+								accessibilityLabel={text.name}
+								placeholderTextColor={colors.placeholder}
+								returnKeyType="done"
+							/>
+							<TouchableOpacity
+								accessibilityRole="button"
+								style={styles.button}
+								disabled={isSaving}
+								onPress={handleSave}
+							>
+								{isSaving && <ActivityIndicator color={colors.primary} />}
+								<Text style={styles.buttonText}>
+									{isSaving ? text.saving : action === 'create' ? text.create : text.confirm}
+								</Text>
+							</TouchableOpacity>
+						</View>
+					)}
+					{error && (
+						<Text accessibilityRole="alert" style={styles.error}>
+							{error}
+						</Text>
+					)}
+					<TouchableOpacity
+						accessibilityRole="button"
+						disabled={isSaving}
+						style={styles.button}
+						onPress={() => {
+							invalidate()
+							router.dismiss()
+						}}
+					>
+						<Text style={styles.buttonText}>{text.cancel}</Text>
+					</TouchableOpacity>
 				</ScrollView>
 			</KeyboardAvoidingView>
 		</SafeAreaView>
 	)
 }
 
-const createStyles = (
-	colors: ThemeColors,
-	defaultStyles: ReturnType<typeof useDefaultStyles>,
-) =>
+const createStyles = (colors: ThemeColors, defaultStyles: ReturnType<typeof useDefaultStyles>) =>
 	StyleSheet.create({
-	modalContainer: {
-		...defaultStyles.container,
-		paddingHorizontal: screenPadding.horizontal,
-	},
-	section: {
-		marginBottom: 24,
-	},
-	sectionTitle: {
-		fontSize: 20,
-		fontWeight: '600',
-		color: colors.text,
-		marginBottom: 16,
-	},
-	divider: {
-		height: 1,
-		backgroundColor: colors.separator,
-		marginVertical: 24,
-	},
-	buttonContainer: {
-		marginTop: 0,
-	},
-	dismissSymbol: {
-		position: 'absolute',
-		left: 0,
-		right: 0,
-		flexDirection: 'row',
-		justifyContent: 'center',
-		zIndex: 1,
-	},
-	dismissBar: {
-		width: 50,
-		height: 5,
-		borderRadius: 2.5,
-		backgroundColor: colors.dismissBar,
-	},
-	inputContainer: {
-		width: '100%',
-	},
-	inputLabel: {
-		fontSize: 16,
-		fontWeight: '600',
-		color: colors.text,
-		marginBottom: 8,
-	},
-	header: {
-		fontSize: 31,
-		fontWeight: 'bold',
-		padding: 0,
-		paddingTop: 5,
-		marginBottom: 24,
-		color: colors.text,
-	},
-	input: {
-		height: 44,
-		backgroundColor: colors.surfaceMuted,
-		borderRadius: 8,
-		paddingHorizontal: 16,
-		fontSize: 16,
-		color: colors.text,
-		width: '100%',
-	},
-	coverContainer: {
-		width: 100,
-	},
-	coverPicker: {
-		width: 100,
-		height: 100,
-		borderRadius: 8,
-		overflow: 'hidden',
-		backgroundColor: colors.surfaceMuted,
-		justifyContent: 'center',
-		alignItems: 'center',
-	},
-	coverImage: {
-		width: '100%',
-		height: '100%',
-		resizeMode: 'cover',
-	},
-	coverPlaceholder: {
-		width: '100%',
-		height: '100%',
-		justifyContent: 'center',
-		alignItems: 'center',
-	},
-	coverText: {
-		color: colors.primary,
-		marginTop: 8,
-		fontSize: 14,
-	},
-	error: {
-		color: colors.error,
-		marginTop: 10,
-	},
-	successText: {
-		color: colors.success,
-		marginTop: 10,
-	},
-	button: {
-		padding: 12,
-		backgroundColor: colors.surfaceMuted,
-		borderRadius: 8,
-		flexDirection: 'row',
-		justifyContent: 'center',
-		alignItems: 'center',
-		columnGap: 8,
-		width: '100%',
-	},
-	buttonText: {
-		...defaultStyles.text,
-		color: colors.primary,
-		fontWeight: '600',
-		fontSize: 18,
-		textAlign: 'center',
-	},
-	createPlaylistCard: {
-		backgroundColor: colors.surface,
-		borderRadius: 12,
-		padding: 16,
-		gap: 16,
-	},
-	createPlaylistContainer: {
-		flexDirection: 'row',
-		alignItems: 'center',
-		columnGap: 16,
-	},
-	playlistInfoContainer: {
-		flex: 1,
-		height: 100,
-		justifyContent: 'center',
-	},
-	importContainer: {
-		width: '100%',
-	},
+		container: { ...defaultStyles.container, paddingHorizontal: screenPadding.horizontal },
+		flex: { flex: 1 },
+		content: { gap: 16, paddingBottom: 16 },
+		header: { fontSize: 28, fontWeight: 'bold', color: colors.text },
+		section: { gap: 12, padding: 16, borderRadius: 12, backgroundColor: colors.surface },
+		label: { fontSize: 17, fontWeight: '600', color: colors.text },
+		hint: { fontSize: 14, lineHeight: 21, color: colors.textMuted },
+		row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+		previewRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+		choice: {
+			flexGrow: 1,
+			flexBasis: 80,
+			minHeight: 44,
+			padding: 10,
+			borderRadius: 8,
+			alignItems: 'center',
+			justifyContent: 'center',
+			backgroundColor: colors.surfaceMuted,
+		},
+		selected: { backgroundColor: colors.primary },
+		choiceText: { color: colors.text, fontWeight: '600', textAlign: 'center' },
+		selectedText: { color: colors.background },
+		input: {
+			minHeight: 44,
+			paddingHorizontal: 12,
+			paddingVertical: 10,
+			borderRadius: 8,
+			fontSize: 16,
+			color: colors.text,
+			backgroundColor: colors.surfaceMuted,
+		},
+		cover: { width: 80, height: 80, borderRadius: 8 },
+		coverPicker: {
+			minHeight: 44,
+			alignSelf: 'flex-start',
+			justifyContent: 'center',
+			padding: 8,
+			borderRadius: 8,
+			backgroundColor: colors.surfaceMuted,
+		},
+		button: {
+			minHeight: 44,
+			padding: 12,
+			flexDirection: 'row',
+			gap: 8,
+			alignItems: 'center',
+			justifyContent: 'center',
+			borderRadius: 8,
+			backgroundColor: colors.surfaceMuted,
+		},
+		buttonText: { fontSize: 16, fontWeight: '600', color: colors.primary, textAlign: 'center' },
+		error: { color: colors.error, fontSize: 14, lineHeight: 21 },
 	})
 
 export default ImportPlayList

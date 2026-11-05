@@ -1,0 +1,96 @@
+import { nowLanguage } from '@/utils/i18n'
+
+const zh = {
+	title: '创建或导入歌单',
+	create: '创建歌单',
+	import: '导入歌单',
+	source: '歌单平台',
+	auto: '自动识别',
+	QQ: 'QQ 音乐',
+	Netease: '网易云音乐',
+	linkPlaceholder: '粘贴歌单链接或 ID',
+	idHint: '链接可自动识别；纯数字 ID 请先选择平台。',
+	choosePlatform: '纯数字 ID 需要先选择 QQ 音乐或网易云音乐。',
+	invalidLink: '无法识别歌单链接，或链接与所选平台不符。请检查后重试。',
+	preview: '识别并预览',
+	recognizing: '正在识别...',
+	retry: '重试识别',
+	previewTitle: '歌单预览',
+	cover: '歌单封面',
+	songs: '首歌曲',
+	exists: '已存在对应歌单',
+	newPlaylist: '尚未导入，确认后将创建歌单。',
+	update: '更新',
+	copy: '另存副本',
+	merge: '合并',
+	updateHint:
+		'更新会移除远端已删除的歌曲，保留本地手动添加的歌曲（localAdded）。自定义名称和封面保持不变。',
+	copyHint: '创建独立的本地副本，不影响已有歌单，副本不绑定远端刷新。',
+	mergeHint: '合并保留旧歌并加入远端歌曲。保留的旧歌会标记为本地添加（localAdded）。',
+	refreshHint:
+		'绑定远端来源；后续刷新会移除远端已删除的歌曲，保留本地手动添加的歌曲（localAdded）。',
+	details: '歌单信息',
+	customize: '自定义（可选，刷新时保留）',
+	chooseCover: '选择封面',
+	name: '歌单名称',
+	optionalName: '自定义名称（留空使用原名称）',
+	nameRequired: '请输入歌单名称。',
+	confirm: '确认导入',
+	saving: '正在保存...',
+	cancel: '取消',
+	unknownArtist: '未知歌手',
+	coverFailed: '封面选择失败，请重试。',
+	importFailed: '识别失败，歌单可能不可访问、链接已失效或网络异常。请检查后重试，本地数据未更改。',
+	saveFailed: '保存失败，请重试。',
+}
+
+const en: typeof zh = {
+	title: 'Create or Import Playlist',
+	create: 'Create playlist',
+	import: 'Import playlist',
+	source: 'Playlist platform',
+	auto: 'Auto-detect',
+	QQ: 'QQ Music',
+	Netease: 'NetEase Music',
+	linkPlaceholder: 'Paste a playlist link or ID',
+	idHint: 'Links are detected automatically. Select a platform for numeric IDs.',
+	choosePlatform: 'Select QQ Music or NetEase Music before using a numeric ID.',
+	invalidLink: 'Unrecognized playlist link or platform mismatch. Check the link and retry.',
+	preview: 'Identify and preview',
+	recognizing: 'Identifying...',
+	retry: 'Retry preview',
+	previewTitle: 'Playlist preview',
+	cover: 'Playlist cover',
+	songs: 'songs',
+	exists: 'Matching playlist already exists',
+	newPlaylist: 'Not imported yet. Confirm to create the playlist.',
+	update: 'Update',
+	copy: 'Save a copy',
+	merge: 'Merge',
+	updateHint:
+		'Update removes songs deleted remotely and keeps manually added songs (localAdded). Custom names and covers are preserved.',
+	copyHint:
+		'Create an independent local copy without changing the existing playlist. The copy has no remote refresh binding.',
+	mergeHint:
+		'Keep old songs and add remote songs. Retained old songs are marked as locally added (localAdded).',
+	refreshHint:
+		'Links to the remote playlist. Future refreshes remove songs deleted remotely and keep manually added songs (localAdded).',
+	details: 'Playlist details',
+	customize: 'Customize (optional, preserved on refresh)',
+	chooseCover: 'Choose cover',
+	name: 'Playlist name',
+	optionalName: 'Custom name (leave blank to keep original)',
+	nameRequired: 'Enter a playlist name.',
+	confirm: 'Confirm import',
+	saving: 'Saving...',
+	cancel: 'Cancel',
+	unknownArtist: 'Unknown artist',
+	coverFailed: 'Could not select a cover. Please retry.',
+	importFailed:
+		'Preview failed. The playlist may be unavailable, the link may have expired, or the network may be offline. Check and retry. Local data has not changed.',
+	saveFailed: 'Could not save. Please retry.',
+}
+
+export function usePlaylistFeatureText() {
+	return nowLanguage.useValue()?.startsWith('zh') ? zh : en
+}

@@ -5,7 +5,6 @@ import assert from 'node:assert/strict'
 import fsp from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
-import ts from 'typescript'
 import {
 	createFixture,
 	deferred,
@@ -73,26 +72,100 @@ async function main() {
 	await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 	const baseUrl = `http://127.0.0.1:${server.address().port}`
 	for (const status of [200, 201, 204, 206, 404, 500])
-		await test(`HTTP ${status}: preserve the stored path and commit only 200`, async () => {
+		await test(`HTTP ${status}: atomically commit nonempty 200 only`, async () => {
 			const h = httpRuntime()
 			const cache = h.load('src/player/CacheManager.ts')
 			const track = item(`status-${status}#%23`, `${baseUrl}/${status}`, { platform: 'fixture' })
-			const rawTarget = `${fixture.documents}/musicCache/fixture_status-${status}#%23.mp3`
-			const localPath = `${cache.cacheDir}fixture_status-${status}#%23.mp3`
-			assert.equal(cache.getLocalFilePath(track), localPath)
+			const localPath = cache.getLocalFilePath(track)
+			assert.match(localPath.slice(cache.cacheDir.length), /^v2-[a-f0-9]{64}\.mp3$/)
+			const rawTarget = fileURLToPath(cache.getCacheFileUri(localPath))
 			assert.equal(cache.getCacheFileUri(localPath), uri(rawTarget))
-			await write(rawTarget, 'previous-valid-audio')
 			if (status === 200) assert.equal(await cache.downloadToCache(track), localPath)
-			else await assert.rejects(cache.downloadToCache(track), new RegExp(`状态码: ${status}`))
-			assert.equal(
-				await fsp.readFile(rawTarget, 'utf8'),
-				status === 200 ? 'audio-fixture-200' : 'previous-valid-audio',
-			)
-			assert.equal(await cache.isCached(track), true)
+			else await assert.rejects(cache.downloadToCache(track), /EMPTY_OR_FAILED_CACHE_DOWNLOAD/)
+			assert.equal(await exists(rawTarget), status === 200)
+			if (status === 200) assert.equal(await fsp.readFile(rawTarget, 'utf8'), 'audio-fixture-200')
+			assert.equal(await cache.isCached(track), status === 200)
+			assert.equal(h.calls.moves.length, status === 200 ? 1 : 0)
+			assert.equal(h.calls.downloads.length, 1)
 			assert.equal(h.calls.writes.length, 0)
 			assert(!h.calls.temporaryDeletes.includes(uri(rawTarget)))
 			await assertClean(h)
 		})
+	await test('valid v2 cache is reused without transport or overwrite, including failing remote URLs', async () => {
+		const h = httpRuntime()
+		const cache = h.load('src/player/CacheManager.ts')
+		const track = item('reuse#%23', `${baseUrl}/500`, { platform: 'fixture' })
+		const localPath = cache.getLocalFilePath(track)
+		const target = fileURLToPath(cache.getCacheFileUri(localPath))
+		await write(target, 'previous-valid-audio')
+		assert.equal(await cache.downloadToCache(track), localPath)
+		assert.equal(await cache.isCached(track), true)
+		assert.equal(await fsp.readFile(target, 'utf8'), 'previous-valid-audio')
+		assert.equal(h.calls.downloads.length, 0)
+		assert.equal(h.calls.moves.length, 0)
+		assert.equal(h.calls.deletes.length, 0)
+		assert.equal(h.calls.writes.length, 0)
+	})
+	await test('empty 200 bytes never become a readable cache entry and a retry can commit', async () => {
+		const h = httpRuntime()
+		const cache = h.load('src/player/CacheManager.ts')
+		const track = item('empty-200', `${baseUrl}/200`)
+		h.hooks.download = async ({ fileUri }) => {
+			await write(fileURLToPath(fileUri), '')
+			return { status: 200, uri: fileUri }
+		}
+		await assert.rejects(cache.downloadToCache(track), /EMPTY_OR_FAILED_CACHE_DOWNLOAD/)
+		assert.equal(await cache.findCachedPath(track), undefined)
+		assert.equal(h.calls.moves.length, 0)
+		await assertClean(h)
+		h.hooks.download = httpDownload
+		assert.equal(await cache.downloadToCache(track), cache.getLocalFilePath(track))
+		assert.equal(await cache.isCached(track), true)
+		assert.equal(h.calls.downloads.length, 2)
+		await assertClean(h)
+	})
+	await test('shared cache downloads keep one writer when one consumer cancels', async () => {
+		const h = httpRuntime(), entered = deferred(), finish = deferred()
+		const cache = h.load('src/player/CacheManager.ts')
+		const track = item('shared-writer', `${baseUrl}/200`)
+		h.hooks.download = async (request) => {
+			const result = await httpDownload(request)
+			entered.resolve()
+			await finish.promise
+			return result
+		}
+		const controller = new AbortController()
+		const first = cache.downloadToCache(track, { signal: controller.signal })
+		const cancelled = assert.rejects(first, /CACHE_CANCELLED/)
+		const second = cache.downloadToCache(track)
+		await entered.promise
+		controller.abort()
+		await cancelled
+		assert.equal(h.calls.downloads.length, 1)
+		assert.equal(h.calls.cancellations.length, 0, 'A live consumer still owns the shared writer')
+		assert.equal(await cache.isCached(track), false)
+		finish.resolve()
+		assert.equal(await second, cache.getLocalFilePath(track))
+		assert.equal(await cache.isCached(track), true)
+		await assertClean(h)
+	})
+	await test('source contents and quality isolate cache destinations and preserve transport headers', async () => {
+		const h = httpRuntime()
+		const cache = h.load('src/player/CacheManager.ts')
+		const track = item('identity', `${baseUrl}/200`, { headers: { Authorization: 'fixture-token' }, userAgent: 'fixture-agent' })
+		const paths = []
+		for (const [script, quality] of [['first', '128k'], ['second', '128k'], ['second', 'flac']]) {
+			h.stores.musicApiSelectedStore.setValue({ id: 'same-id', script })
+			h.stores.qualityStore.setValue(quality)
+			paths.push(await cache.downloadToCache(track))
+			assert.equal(await cache.isCached(track), true)
+		}
+		assert.equal(new Set(paths).size, 3)
+		assert.match(paths[2], /\.flac$/)
+		assert.equal(h.calls.downloads.length, 3)
+		for (const request of h.calls.downloads) assert.deepEqual(request.options.headers, { Authorization: 'fixture-token', 'User-Agent': 'fixture-agent' })
+		await assertClean(h)
+	})
 	for (const outcome of [
 		200,
 		201,
@@ -156,7 +229,8 @@ async function main() {
 				cache.downloadToCache(item(`auto-${phase}`, `${baseUrl}/200`)),
 				(error) => error === primary,
 			)
-			assert.equal(h.calls.errors.at(-1)[1], primary)
+			assert.equal(h.calls.errors.length, 0, 'Cache owner propagates errors; its caller logs them')
+			assert.equal(await cache.isCached(item(`auto-${phase}`, `${baseUrl}/200`)), false)
 			await assertClean(h)
 		}
 	})
@@ -164,15 +238,18 @@ async function main() {
 		const h = httpRuntime()
 		const cache = h.load('src/player/CacheManager.ts')
 		const track = item('already#%23', `${baseUrl}/500`, { platform: 'fixture' })
-		const localPath = cache.getLocalFilePath(track)
+		const localPath = `${cache.cacheDir}fixture_already#%23.mp3`
 		await write(`${fixture.documents}/musicCache/fixture_already#%23.mp3`, 'already-cached')
 		await h.load('src/helpers/trackPlayerIndex.ts').default.cacheAndImportMusic(track)
 		assert.equal(h.stores.importedLocalMusicStore.getValue()[0].url, localPath)
+		assert.equal(cache.getLocalFilePath(track), localPath, 'Discovery retains the legacy stored path')
 		assert.equal(h.calls.downloads.length, 0)
 		assert.equal(h.calls.alerts.length, 1)
 	})
 	await test('manual import waits for the final move before writing its record', async () => {
 		const h = httpRuntime()
+		const track = item('await-move', `${baseUrl}/200`)
+		const cache = h.load('src/player/CacheManager.ts')
 		const entered = deferred(),
 			finish = deferred()
 		h.hooks.move = async () => {
@@ -181,13 +258,21 @@ async function main() {
 		}
 		const pending = h
 			.load('src/helpers/trackPlayerIndex.ts')
-			.default.cacheAndImportMusic(item('await-move', `${baseUrl}/200`))
+			.default.cacheAndImportMusic(track)
 		await entered.promise
+		assert.equal(await cache.isCached(track), false, 'Readers cannot see the staging file')
+		const move = h.calls.moves[0]
+		assert.equal(await exists(fileURLToPath(move.from)), true)
+		assert.equal(await exists(fileURLToPath(move.to)), false)
+		assert.equal(fileURLToPath(move.from).slice(0, fileURLToPath(move.from).lastIndexOf('/')),
+			fileURLToPath(move.to).slice(0, fileURLToPath(move.to).lastIndexOf('/')))
 		assert.equal(h.calls.writes.length, 0)
 		assert.equal(h.calls.alerts.length, 0)
 		finish.resolve()
 		await pending
 		assert.equal(h.calls.writes.length, 1)
+		assert.equal(await cache.isCached(track), true)
+		assert.equal(await fsp.readFile(fileURLToPath(move.to), 'utf8'), 'audio-fixture-200')
 		await assertClean(h)
 	})
 	await test('cleanup errors preserve the original rejection and are logged', async () => {
@@ -309,74 +394,13 @@ async function main() {
 		await assertClean(h)
 	})
 
-	// Execute the existing unexported picker handler itself, not a copied implementation.
-	const source = ts.createSourceFile(
-		'settingModal.tsx',
-		await fsp.readFile(`${projectRoot}/src/app/(modals)/settingModal.tsx`, 'utf8'),
-		ts.ScriptTarget.Latest,
-		true,
-		ts.ScriptKind.TSX,
-	)
-	const statement = source.statements.find(
-		(node) =>
-			ts.isVariableStatement(node) &&
-			node.declarationList.declarations.some(
-				(declaration) => declaration.name.getText(source) === 'importMusicSourceFromFile',
-			),
-	)
-	assert(statement, 'The existing picker handler must remain present')
-	const code = ts.transpileModule(statement.getText(source), {
-		compilerOptions: { target: ts.ScriptTarget.ES2022 },
-	}).outputText
-	for (const outcome of ['unicode', 'cancel', 'read-error'])
-		await test(`source picker: ${outcome} preserves the original URI and error flow`, async () => {
-			const h = httpRuntime(),
-				parsed = [],
-				imported = [],
-				alerts = []
-			const selected = uri(`${fixture.temporary}/picker/音源 #100%23.js`)
-			const content = 'module.exports = { name: "音源", value: "100%#" }'
-			await write(fileURLToPath(selected), content)
-			if (outcome === 'read-error')
-				h.hooks.text = async () => {
-					throw new Error('Fixture read failed')
-				}
-			const handler = new Function(
-				'DocumentPicker',
-				'File',
-				'logInfo',
-				'logError',
-				'createMusicApiFromScript',
-				'myTrackPlayer',
-				'Alert',
-				`${code}\nreturn importMusicSourceFromFile`,
-			)(
-				{
-					getDocumentAsync: async (options) => {
-						assert.deepEqual(options, { type: 'text/javascript', copyToCacheDirectory: false })
-						return outcome === 'cancel'
-							? { canceled: true }
-							: { canceled: false, assets: [{ uri: selected }] }
-					},
-				},
-				h.expoFs.File,
-				() => {},
-				() => {},
-				async (text) => {
-					parsed.push(text)
-					return { id: 'fixture-source' }
-				},
-				{ addMusicApi: (api) => imported.push(api) },
-				{ alert: (...args) => alerts.push(args) },
-			)
-			await handler()
-			assert.deepEqual(h.calls.text, outcome === 'cancel' ? [] : [selected])
-			assert.deepEqual(parsed, outcome === 'unicode' ? [content] : [])
-			assert.equal(imported.length, outcome === 'unicode' ? 1 : 0)
-			assert.equal(alerts.length, outcome === 'read-error' ? 1 : 0)
-			if (outcome === 'read-error')
-				assert.deepEqual(alerts[0], ['导入失败', '无法导入音源: Fixture read failed'])
-		})
+	const sourceManagement = await fsp.readFile(`${projectRoot}/src/app/(modals)/sourceManagement.tsx`, 'utf8')
+	assert.match(sourceManagement, /getDocumentAsync/)
+	assert.match(sourceManagement, /importManagedSource/)
+	await test('source manager keeps the native document picker and managed import path', async () => {
+		assert.match(sourceManagement, /copyToCacheDirectory: true/)
+		assert.match(sourceManagement, /await importManagedSource\(await new File\(result\.assets\[0\]\.uri\)\.text\(\)/)
+	})
 }
 
 main()

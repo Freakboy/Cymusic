@@ -109,10 +109,12 @@ export function createFixture() {
 			'musicApiSelectedStore',
 			'nowApiState',
 			'autoCacheLocalStore',
+			'preloadNextTrackStore',
 			'isCachedIconVisibleStore',
 			'songsNumsToLoadStore',
 			'importedLocalMusicStore',
 			'nowLyricState',
+			'nowTranslationLyricState',
 			'trackSkipLoadingStore',
 			'trackSourceLoadingStore',
 			'playbackIntentStore',
@@ -121,6 +123,7 @@ export function createFixture() {
 		stores.qualityStore.setValue('128k')
 		stores.repeatModeStore.setValue('queue')
 		stores.playbackIntentStore.setValue('pause')
+		stores.preloadNextTrackStore.setValue(true)
 		const persistence = {
 			get: (key) => {
 				const value = disk.has(key) ? JSON.parse(disk.get(key)) : null
@@ -157,8 +160,8 @@ export function createFixture() {
 		}
 		const progressListeners = new Set()
 		const legacyNative = {
-			documentDirectory: uri(documents),
-			cacheDirectory: uri(`${library}/Caches`),
+			documentDirectory: uri(documents) + '/',
+			cacheDirectory: uri(`${library}/Caches`) + '/',
 			getInfoAsync: async (address) => {
 				try {
 					const info = await fsp.stat(rawPath(address))
@@ -178,6 +181,7 @@ export function createFixture() {
 			},
 			moveAsync: async (options) => {
 				calls.moves.push(options)
+				if (hooks.move) await hooks.move({ uri: options.from }, { uri: options.to })
 				await fsp.rename(rawPath(options.from), rawPath(options.to))
 			},
 			addListener: (event, listener) => {
@@ -333,6 +337,11 @@ export function createFixture() {
 			PlaybackState: { Idle: 'idle', Ready: 'ready', Buffering: 'buffering', Ended: 'ended', Error: 'error' },
 		}
 		const cache = {
+			cacheIdentity: () => ({ sourceId: 'direct', quality: stores.qualityStore.getValue() }),
+			findCachedPath: async (track) => {
+				calls.cache.push(track.id)
+				return undefined
+			},
 			isCached: async (track) => {
 				calls.cache.push(track.id)
 				return false
@@ -353,6 +362,7 @@ export function createFixture() {
 			logError: (...args) => calls.errors.push(args),
 		}
 		const overrides = {
+			axios: { post: async () => { throw new Error('Unexpected QQ matching request') } },
 			expo: {
 				requireNativeModule: (name) => {
 					assert.equal(name, 'CyMusicFileSystem')
@@ -449,7 +459,7 @@ export function createFixture() {
 					: specifier
 				if (Object.hasOwn(overrides, key)) return overrides[key]
 				if (absolute) return load(absolute)
-				if (specifier === 'immer' || specifier === 'lodash.shuffle')
+				if (specifier === 'immer' || specifier === 'lodash.shuffle' || specifier === 'crypto-js/sha256')
 					return projectRequire(specifier)
 				throw new Error(`Unexpected import ${specifier} from ${relativeFile}`)
 			}
@@ -471,7 +481,7 @@ export function createFixture() {
 					return calls.timers.length
 				},
 				() => {},
-				{ log() {}, warn() {} },
+				{ log() {}, warn() {}, error: (...args) => calls.errors.push(args) },
 				globals,
 			)
 			return module.exports

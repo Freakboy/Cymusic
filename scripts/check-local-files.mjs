@@ -312,7 +312,10 @@ async function main() {
 			),
 		)
 		const snapshot = JSON.stringify(saved)
-		const expected = { url: uri(`${documents}/importedLocalMusic/ascii.mp3`), wasCached: false }
+		const expected = {
+			url: uri(`${documents}/importedLocalMusic/ascii.mp3`), wasCached: false,
+			headers: undefined, userAgent: undefined,
+		}
 		assert.deepEqual(await source.resolveSource(saved, { requestType: 'current' }), expected)
 		assert.deepEqual(await source.resolveSource(saved, { requestType: 'preload' }), expected)
 		await source.preloadSource(saved)
@@ -454,13 +457,14 @@ async function main() {
 		)
 	})
 	await test('already-cached import produces exactly one scheme with the same path', async () => {
-		const importing = runtime()
+		const importing = runtime({ realCache: true })
 		const facade = importing.load('src/helpers/trackPlayerIndex.ts').default
-		const expected = `${documents}/musicCache/cache-id.mp3`
+		const expected = `${documents}/musicCache/local_cache-id.mp3`
 		await write(expected, 'cached bytes')
 		await facade.cacheAndImportMusic(item('cache-id', 'https://example.test/music.mp3'))
 		assert.equal(importing.stores.importedLocalMusicStore.getValue()[0].url, uri(expected))
 		assert.equal(await fsp.readFile(expected, 'utf8'), 'cached bytes')
+		assert.equal(importing.calls.downloads.length, 0)
 	})
 	await test('dangling links remain links and cannot select another URI interpretation', async () => {
 		const dangling = `${documents}/importedLocalMusic/dangling.mp3`

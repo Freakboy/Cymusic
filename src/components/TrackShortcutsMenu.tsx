@@ -1,9 +1,10 @@
 import myTrackPlayer from '@/helpers/trackPlayerIndex'
 import { getSingerMidBySingerName } from '@/helpers/userApi/getMusicSource'
+import { getCommentsPlatform } from '@/helpers/userApi/neteaseComments'
 import { useFavorites } from '@/store/library'
 import { isInPlayList } from '@/store/playList'
 import { useQueue } from '@/store/queue'
-import i18n from '@/utils/i18n'
+import i18n from '@/locales/commentsFeature'
 import { MenuAction, MenuView } from '@react-native-menu/menu'
 import { useFocusEffect, useRouter } from 'expo-router'
 import { PropsWithChildren, useCallback, useMemo, useState } from 'react'
@@ -28,6 +29,8 @@ export const TrackShortcutsMenu = ({
 	const { favorites, toggleTrackFavorite } = useFavorites()
 	const isFavorite = favorites.find((trackItem) => trackItem.id === track?.id)
 	const { activeQueueId } = useQueue()
+	const commentsPlatform = getCommentsPlatform(track.platform)
+	const supportsComments = !!commentsPlatform
 
 	const [isInPlaylist, setIsInPlaylist] = useState(false)
 
@@ -130,6 +133,19 @@ export const TrackShortcutsMenu = ({
 			.with('delete-track', async () => {
 				onDeleteTrack?.(track.id)
 			})
+			.with('view-comments', () => {
+				if (!supportsComments) return
+				router.push({
+					pathname: '/(modals)/comments',
+					params: {
+						id: track.id,
+						songmid: String(track.songmid || ''),
+						platform: commentsPlatform,
+						title: track.title || '',
+						artist: artists.join('、'),
+					},
+				})
+			})
 			.otherwise(() => {
 				// handleViewArtist()
 				console.warn(`Unknown menu action ${id}`)
@@ -158,6 +174,9 @@ export const TrackShortcutsMenu = ({
 					image: 'text.badge.plus',
 				},
 				...(isSinger ? [] : (artistActions as MenuAction[])),
+				...(supportsComments
+					? [{ id: 'view-comments', title: i18n.t('commentsFeature.title'), image: 'text.bubble' }]
+					: []),
 				...(allowDelete
 					? [
 							{

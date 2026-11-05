@@ -1,6 +1,8 @@
 import myTrackPlayer from '@/helpers/trackPlayerIndex'
 import { useEffect } from 'react'
 import TrackPlayer, { PlayerCommand, RepeatMode } from '@rntp/player'
+import { startCarPlayBridge } from '@/helpers/carPlay'
+import { logError } from '@/helpers/logger'
 
 let nativeConfigured = false
 
@@ -37,6 +39,9 @@ const initializePlayer = () => {
 	if (!initialization) {
 		initialization = Promise.resolve().then(setupPlayer)
 			.then(() => myTrackPlayer.setupTrackPlayer())
+			.then(async () => {
+				await startCarPlayBridge().catch((error) => logError('车载桥接初始化失败', error))
+			})
 			.catch((error) => {
 				initialization = undefined
 				throw error

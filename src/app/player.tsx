@@ -10,6 +10,7 @@ import { ThemeColors, fontSize, screenPadding } from '@/constants/tokens'
 import LyricManager from '@/helpers/lyricManager'
 import myTrackPlayer from '@/helpers/trackPlayerIndex'
 import { getSingerMidBySingerName } from '@/helpers/userApi/getMusicSource'
+import { getCommentsPlatform } from '@/helpers/userApi/neteaseComments'
 import { ThemeOverrideProvider, useThemeColors } from '@/hooks/useAppTheme'
 import { usePlayerBackground } from '@/hooks/usePlayerBackground'
 import { useTrackPlayerFavorite } from '@/hooks/useTrackPlayerFavorite'
@@ -132,6 +133,9 @@ const PlayerScreenContent = () => {
 	const { isFavorite, toggleFavorite } = useTrackPlayerFavorite()
 	const [showLyrics, setShowLyrics] = useState(false)
 	const [showLyricDelayControls, setShowLyricDelayControls] = useState(false)
+	const showTranslation = PersistStatus.useValue('lyric.showTranslation', false) === true
+	const lyricMode = PersistStatus.useValue('lyric.displayMode') ?? (showTranslation ? 'bilingual' : 'original')
+	const { hasTranslation } = LyricManager.useLyricState()
 	const lyricDelaySeconds = PersistStatus.useValue('lyric.delaySeconds', 0) ?? 0
 	const lyricsOpacity = useSharedValue(0)
 	const lyricsTranslateY = useSharedValue(50)
@@ -271,6 +275,10 @@ const PlayerScreenContent = () => {
 			console.error(error.message)
 		}
 	}, [trackToDisplay])
+	const handleComments = useCallback(() => {
+		if (!trackToDisplay) return
+		router.push({ pathname: '/(modals)/comments', params: { id: trackToDisplay.id, songmid: trackToDisplay.songmid || trackToDisplay.id, platform: trackToDisplay.platform, title: trackToDisplay.title, artist: trackToDisplay.artist } })
+	}, [trackToDisplay])
 	const handleTimingClose = useCallback((minutes: number) => {
 		setTimingClose(Date.now() + minutes * 60 * 1000)
 	}, [])
@@ -285,6 +293,7 @@ const PlayerScreenContent = () => {
 			},
 			{ id: 'album', title: i18n.t('player.showAlbum'), image: 'music.note.list' },
 			{ id: 'lyrics', title: i18n.t('player.showLyrics'), image: 'text.quote' },
+			...(getCommentsPlatform(trackToDisplay?.platform) ? [{ id: 'comments', title: i18n.t('player.showComments'), image: 'bubble.left' }] : []),
 			{ id: 'playlist', title: i18n.t('player.addToPlaylist'), image: 'plus.circle' },
 			{ id: 'share', title: i18n.t('player.share'), image: 'square.and.arrow.up' },
 			{
@@ -393,6 +402,11 @@ const PlayerScreenContent = () => {
 							{ paddingTop: top + 40, paddingBottom: Math.max(bottom, 16) },
 						]}
 					>
+						{getCommentsPlatform(trackToDisplay?.platform) ? (
+							<TouchableOpacity style={styles.lyricCommentButton} onPress={handleComments} accessibilityRole="button" accessibilityLabel={i18n.t('player.showComments')}>
+								<MaterialCommunityIcons name="comment-outline" size={22} color={colors.text} />
+							</TouchableOpacity>
+						) : null}
 						<Animated.View style={[styles.lyricContainer, lyricsAnimatedStyle]}>
 							{/* <Pressable style={styles.artworkTouchable} onPress={handleLyricsToggle}> */}
 							<Lyric onTurnPageClick={handleLyricsToggle} />
@@ -412,32 +426,29 @@ const PlayerScreenContent = () => {
 									accessible={false}
 								/>
 							</TouchableOpacity>
-							<TouchableOpacity
-								style={styles.lyricToolbarButton}
-								onPress={handleLyricsFontSizeDecrease}
-								accessibilityRole="button"
-								accessibilityLabel={i18n.t('player.decreaseLyricFontSize')}
-							>
-								<MaterialCommunityIcons
-									name="format-font-size-decrease"
-									size={30}
-									color={colors.text}
-									accessible={false}
-								/>
-							</TouchableOpacity>
-							<TouchableOpacity
-								style={styles.lyricToolbarButton}
-								onPress={handleLyricsFontSizeIncrease}
-								accessibilityRole="button"
-								accessibilityLabel={i18n.t('player.increaseLyricFontSize')}
-							>
-								<MaterialCommunityIcons
-									name="format-font-size-increase"
-									size={30}
-									color={colors.text}
-									accessible={false}
-								/>
-							</TouchableOpacity>
+							<View style={styles.lyricToolbarButton}>
+								<MenuView actions={[
+									{ id: 'smaller', title: i18n.t('player.decreaseLyricFontSize') },
+									{ id: 'larger', title: i18n.t('player.increaseLyricFontSize') },
+								]} onPressAction={({ nativeEvent }) => nativeEvent.event === 'smaller' ? handleLyricsFontSizeDecrease() : handleLyricsFontSizeIncrease()}>
+									<TouchableOpacity style={styles.lyricToolbarMenuButton} accessibilityRole="button" accessibilityLabel={i18n.t('player.lyricFontSize')}>
+										<MaterialCommunityIcons name="format-size" size={28} color={colors.text} />
+									</TouchableOpacity>
+								</MenuView>
+							</View>
+							<View style={styles.lyricToolbarButton}>
+								<MenuView actions={(['original', 'bilingual', 'translation'] as const).map((mode) => ({
+									id: mode, title: i18n.t(`player.lyricMode.${mode}`), state: lyricMode === mode ? 'on' : 'off',
+									attributes: { disabled: mode !== 'original' && !hasTranslation },
+								}))} onPressAction={({ nativeEvent }) => {
+									const mode = nativeEvent.event
+									if (mode === 'original' || mode === 'bilingual' || mode === 'translation') PersistStatus.set('lyric.displayMode', mode)
+								}}>
+									<TouchableOpacity style={styles.lyricToolbarMenuButton} accessibilityRole="button" accessibilityLabel={i18n.t('player.showTranslation')}>
+										<MaterialCommunityIcons name="translate" size={26} color={hasTranslation && lyricMode !== 'original' ? colors.primary : colors.textMuted} />
+									</TouchableOpacity>
+								</MenuView>
+							</View>
 							<TouchableOpacity
 								style={styles.lyricToolbarButton}
 								onPress={toggleLyricDelayControls}
@@ -550,7 +561,17 @@ const PlayerScreenContent = () => {
 											/>
 										</View>
 
-										{/* Favorite button icon */}
+										<View style={styles.playerHeaderActions}>
+											{getCommentsPlatform(trackToDisplay?.platform) ? <TouchableOpacity
+												style={styles.menuButton}
+												onPress={handleComments}
+												hitSlop={8}
+												accessibilityRole="button"
+												accessibilityLabel={i18n.t('player.showComments')}
+											>
+												<MaterialCommunityIcons name="comment-outline" size={22} color={colors.icon} />
+											</TouchableOpacity> : null}
+											{/* Song options */}
 										<MenuView
 											title={i18n.t('player.songOptions')}
 											onPressAction={({ nativeEvent }) => {
@@ -561,9 +582,12 @@ const PlayerScreenContent = () => {
 													case 'album':
 														handleShowAlbum()
 														break
-													case 'lyrics':
-														handleShowLyrics()
-														break
+									case 'lyrics':
+										handleShowLyrics()
+										break
+									case 'comments':
+										handleComments()
+										break
 													case 'playlist':
 														handleAddToPlaylist()
 														break
@@ -601,6 +625,7 @@ const PlayerScreenContent = () => {
 												<Entypo name="dots-three-horizontal" size={18} color={colors.icon} />
 											</TouchableOpacity>
 										</MenuView>
+										</View>
 									</View>
 
 									{/* Track artist */}
@@ -695,6 +720,13 @@ const createStyles = (colors: ThemeColors, defaultStyles: ReturnType<typeof useD
 			justifyContent: 'center',
 			alignItems: 'center',
 		},
+		playerHeaderActions: {
+			flexDirection: 'row',
+			alignItems: 'center',
+			columnGap: 12,
+		},
+		lyricCommentButton: { position: 'absolute', top: 40, right: screenPadding.horizontal, width: 44, height: 44, alignItems: 'center', justifyContent: 'center', zIndex: 3 },
+		lyricToolbarMenuButton: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
 		screen: {
 			flex: 1,
 		},

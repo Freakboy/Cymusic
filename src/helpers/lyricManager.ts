@@ -7,7 +7,7 @@ import { isSameMediaItem } from '@/utils/mediaItem'
 import { GlobalState } from '@/utils/stateMapper'
 import LyricParser from '@/utils/lrcParser'
 import ReactNativeTrackPlayer, { Event } from '@rntp/player'
-import myTrackPlayer, { nowLyricState } from './trackPlayerIndex'
+import myTrackPlayer, { nowLyricState, nowTranslationLyricState } from './trackPlayerIndex'
 const lyricStateStore = new GlobalState<{
 	loading: boolean
 	lyricParser?: LyricParser
@@ -25,6 +25,7 @@ const currentLyricStore = new GlobalState<ILyric.IParsedLrcItem | null>(null)
 export const durationStore = new GlobalState<number>(0)
 const DEFAULT_LYRIC = '[00:00.00]暂无歌词'
 let lastRawLyric = ''
+let lastRawTranslation = ''
 let lastLyricDelaySeconds: number | null = null
 
 const loadingState = {
@@ -47,12 +48,14 @@ function resetLyricState() {
 		time: 0,
 	})
 	lastRawLyric = ''
+	lastRawTranslation = ''
 	lastLyricDelaySeconds = null
 }
 
 function getLyricSource(): ILyric.ILyricSource {
 	return {
 		rawLrc: nowLyricState.getValue() || DEFAULT_LYRIC,
+		translation: nowTranslationLyricState.getValue() || undefined,
 	}
 }
 
@@ -70,6 +73,7 @@ function shouldRebuildParser(
 	musicItem: IMusic.IMusicItem,
 	lyricParser: LyricParser | undefined,
 	rawLrc: string,
+	translation: string,
 	lyricDelaySeconds: number,
 	forceRequest: boolean,
 ) {
@@ -80,6 +84,7 @@ function shouldRebuildParser(
 	return (
 		!isSameMediaItem(lyricParser.getCurrentMusicItem(), musicItem) ||
 		lastRawLyric !== rawLrc ||
+		lastRawTranslation !== translation ||
 		lastLyricDelaySeconds !== lyricDelaySeconds
 	)
 }
@@ -96,9 +101,10 @@ async function refreshLyric(fromStart?: boolean, forceRequest = false, positionO
 		const lyricDelaySeconds = PersistStatus.get('lyric.delaySeconds') ?? 0
 		const lrcSource = getLyricSource()
 		const rawLrc = lrcSource.rawLrc || DEFAULT_LYRIC
+		const rawTranslation = lrcSource.translation || ''
 		const lyricParser = lyricStateStore.getValue().lyricParser
 
-		if (!shouldRebuildParser(musicItem, lyricParser, rawLrc, lyricDelaySeconds, forceRequest)) {
+		if (!shouldRebuildParser(musicItem, lyricParser, rawLrc, rawTranslation, lyricDelaySeconds, forceRequest)) {
 			if (fromStart) {
 				currentLyricStore.setValue(lyricParser?.getLyric()[0] || null)
 				return
@@ -130,6 +136,7 @@ async function refreshLyric(fromStart?: boolean, forceRequest = false, positionO
 			hasTranslation: !!lrcSource.translation,
 		})
 		lastRawLyric = rawLrc
+		lastRawTranslation = rawTranslation
 		lastLyricDelaySeconds = lyricDelaySeconds
 
 		if (fromStart) {
@@ -167,11 +174,13 @@ const progressSubscription = ReactNativeTrackPlayer.addEventListener(Event.Playb
 
 	const lyricParser = lyricStateStore.getValue().lyricParser
 	const rawLrc = nowLyricState.getValue() || DEFAULT_LYRIC
+	const rawTranslation = nowTranslationLyricState.getValue() || ''
 	const lyricDelaySeconds = PersistStatus.get('lyric.delaySeconds') ?? 0
 	const parserReady =
 		!!lyricParser &&
 		isSameMediaItem(lyricParser.getCurrentMusicItem(), musicItem) &&
 		lastRawLyric === rawLrc &&
+		lastRawTranslation === rawTranslation &&
 		lastLyricDelaySeconds === lyricDelaySeconds
 
 	if (parserReady) {

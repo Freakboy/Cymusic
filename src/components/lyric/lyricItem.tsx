@@ -13,6 +13,7 @@ interface ILyricItemComponentProps {
 	highlight?: boolean
 	// 文本
 	text?: string
+	translation?: string
 	// 字体大小
 	fontSize?: number
 	onPress: () => Promise<void>
@@ -20,7 +21,7 @@ interface ILyricItemComponentProps {
 }
 
 function _LyricItemComponent(props: ILyricItemComponentProps) {
-	const { highlight, text, onLayout, index, fontSize, onPress } = props
+	const { highlight, text, translation, onLayout, index, fontSize, onPress } = props
 	const colors = useThemeColors()
 	const lyricStyles = useMemo(() => createStyles(colors), [colors])
 	const animatedOpacity = useRef(new Animated.Value(0)).current
@@ -49,7 +50,9 @@ function _LyricItemComponent(props: ILyricItemComponentProps) {
 
 	return (
 		<TouchableWithoutFeedback onPress={handlePress}>
-			<View>
+			<View onLayout={({ nativeEvent }) => {
+				if (index !== undefined) onLayout?.(index, nativeEvent.layout.height)
+			}}>
 				<Animated.View
 					style={[
 						lyricStyles.background,
@@ -59,11 +62,6 @@ function _LyricItemComponent(props: ILyricItemComponentProps) {
 					]}
 				/>
 				<Text
-					onLayout={({ nativeEvent }) => {
-						if (index !== undefined) {
-							onLayout?.(index, nativeEvent.layout.height)
-						}
-					}}
 					style={[
 						lyricStyles.item,
 						{
@@ -82,6 +80,7 @@ function _LyricItemComponent(props: ILyricItemComponentProps) {
 				>
 					{text}
 				</Text>
+				{translation ? <Text style={[lyricStyles.translation, { fontSize: (fontSize || rpx(28)) * 0.68 }]}>{translation}</Text> : null}
 			</View>
 		</TouchableWithoutFeedback>
 	)
@@ -93,8 +92,11 @@ const LyricItemComponent = memo(
 		prev.light === curr.light &&
 		prev.highlight === curr.highlight &&
 		prev.text === curr.text &&
+		prev.translation === curr.translation &&
 		prev.index === curr.index &&
-		prev.fontSize === curr.fontSize,
+		prev.fontSize === curr.fontSize &&
+		prev.onPress === curr.onPress &&
+		prev.onLayout === curr.onLayout,
 )
 
 export default LyricItemComponent
@@ -112,6 +114,14 @@ const createStyles = (colors: ThemeColors) =>
 		width: '100%',
 		textAlign: 'center',
 		textAlignVertical: 'center',
+	},
+	translation: {
+		color: colors.textMuted,
+		opacity: 0.8,
+		paddingHorizontal: rpx(64),
+		paddingBottom: rpx(24),
+		width: '100%',
+		textAlign: 'center',
 	},
 	draggingItem: {
 		opacity: 1,

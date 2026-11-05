@@ -3,6 +3,7 @@
 // owners. The native engine is a synchronous seam; audible/seek convergence is iOS acceptance.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import ts from 'typescript'
 import { I18n } from 'i18n-js'
 import { createFixture, deferred, deepFreeze, item } from './file-system-fixture.mjs'
 import { flush, loadModule } from './native-services-fixture.mjs'
@@ -24,7 +25,9 @@ function runtime() {
 	const delays = []
 	const effects = []
 	const stateWrites = []
-	let resolveSource = async (track) => ({ url: track.url, wasCached: false })
+	let resolveSource = async (track) => ({
+		url: track.url, wasCached: false, headers: track.headers, userAgent: track.userAgent,
+	})
 	const react = {
 		memo: (component) => component,
 		useCallback: (callback) => callback,
@@ -50,8 +53,14 @@ function runtime() {
 				sourceCalls.push({ track, options })
 				return resolveSource(track, options)
 			},
-			preloadSource: async () => {},
+			// Keep this suite on the original placeholder handoff; prepared audio has its own checks.
+			prepareNextTrack: async () => null,
+			cancelPreparedNextTrack() {},
+			isPreparedNextTrackValid: () => false,
+			setCurrentStreamPriority() {},
+			withSourceRuntimeLock: (action) => action(),
 		},
+		'@/helpers/carPlay': { startCarPlayBridge: async () => {} },
 		'@/utils/delay': (milliseconds) => {
 			const pending = deferred()
 			delays.push({ milliseconds, ...pending })
@@ -82,6 +91,10 @@ function runtime() {
 		h.load('node_modules/@rntp/player/src/interfaces/PlayerCommand.ts'),
 		h.load('node_modules/@rntp/player/src/interfaces/RepeatMode.ts'),
 	)
+	h.player.replaceMediaItem = (index, track) => {
+		h.calls.player.push(['replace', index, track])
+		h.player.queue[index] = track
+	}
 	const facade = h.load('src/helpers/trackPlayerIndex.ts').default
 	return {
 		...h, facade, react, nativeViews, effects, stateWrites, sourceCalls, delays,
@@ -100,6 +113,9 @@ function findElement(node, type, matches = () => true) {
 		if (found) return found
 	}
 }
+
+const preciseSeekingSwitch = (tree) =>
+	findElement(tree, 'Switch', (node) => node.props.testID === 'settings.preciseSeeking')
 
 function settingsRuntime() {
 	const h = runtime()
@@ -274,8 +290,9 @@ await check('Settings defaults off for missing, malformed and non-Boolean persis
 	]) {
 		if (raw === undefined) h.disk.delete('music.preciseSeeking')
 		else h.disk.set('music.preciseSeeking', raw)
-		assert.equal(findElement(h.render(), 'Switch').props.value, expected, String(raw))
-		assert.equal(h.listeners.size, 1)
+		assert.equal(preciseSeekingSwitch(h.render()).props.value, expected, String(raw))
+		// Settings now subscribes to precise seeking, preloading and Bluetooth lyrics.
+		assert.equal(h.listeners.size, 3)
 		h.unmount()
 		assert.equal(h.listeners.size, 0)
 	}
@@ -285,26 +302,93 @@ await check('Settings defaults off for missing, malformed and non-Boolean persis
 await check('the real Settings Switch saves one key, updates through the storage listener and restores after remount and module reload', () => {
 	const h = settingsRuntime()
 	h.disk.set('music.quality', '"flac"')
-	let control = findElement(h.render(), 'Switch')
+	let control = preciseSeekingSwitch(h.render())
 	assert.equal(control.props.value, false)
 	control.props.onValueChange(true)
 	assert.deepEqual(h.storageWrites, [['music.preciseSeeking', 'true']])
-	assert.equal(findElement(h.render(), 'Switch').props.value, true)
-	assert.equal(h.listeners.size, 1)
+	assert.equal(preciseSeekingSwitch(h.render()).props.value, true)
+	assert.equal(h.listeners.size, 3)
 	h.unmount()
 	assert.equal(h.listeners.size, 0)
-	assert.equal(findElement(h.render(), 'Switch').props.value, true)
+	assert.equal(preciseSeekingSwitch(h.render()).props.value, true)
 	h.unmount()
 	h.reloadPersistence()
-	control = findElement(h.render(), 'Switch')
+	control = preciseSeekingSwitch(h.render())
 	assert.equal(control.props.value, true)
 	control.props.onValueChange(false)
-	assert.equal(findElement(h.render(), 'Switch').props.value, false)
+	assert.equal(preciseSeekingSwitch(h.render()).props.value, false)
 	h.unmount()
 	h.reloadPersistence()
-	assert.equal(findElement(h.render(), 'Switch').props.value, false)
+	assert.equal(preciseSeekingSwitch(h.render()).props.value, false)
 	assert.deepEqual([...h.disk], [['music.quality', '"flac"'], ['music.preciseSeeking', 'false']])
 	h.unmount()
+})
+
+await check('Bluetooth lyrics subscribes independently, persists literal Booleans and removes its listener on unmount', () => {
+	const h = settingsRuntime()
+	const control = () => findElement(h.render(), 'Switch', (node) => node.props.testID === 'settings.bluetoothLyrics')
+	for (const raw of [undefined, 'not-json', 'null', 'false', '0', '1', '"true"', '[]', '{}', 'true']) {
+		if (raw === undefined) h.disk.delete('music.bluetoothLyrics')
+		else h.disk.set('music.bluetoothLyrics', raw)
+		assert.equal(control().props.value, raw === 'true')
+		assert.equal(h.listeners.size, 3)
+		h.persistence.set('music.preciseSeeking', true)
+		assert.equal(control().props.value, raw === 'true', 'Another preference cannot overwrite Bluetooth state')
+		h.unmount()
+		assert.equal(h.listeners.size, 0)
+	}
+	h.storageWrites.length = 0
+	control().props.onValueChange(false)
+	assert.equal(control().props.value, false)
+	assert.deepEqual(h.storageWrites, [['music.bluetoothLyrics', 'false']])
+	h.unmount()
+	h.reloadPersistence()
+	assert.equal(control().props.value, false)
+	control().props.onValueChange(true)
+	assert.equal(control().props.value, true)
+	h.unmount()
+	assert.equal(h.listeners.size, 0)
+})
+
+await check('the four lyric toolbar controls retain back/font/mode/delay actions through their menu layout', () => {
+	// Execute the production JSX subtree with controlled handlers; no copied UI implementation.
+	const source = ts.createSourceFile('player.tsx', fs.readFileSync(new URL('../src/app/player.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+	let toolbar
+	const visit = (node) => {
+		if (ts.isJsxElement(node) && node.openingElement.attributes.properties.some((prop) =>
+			ts.isJsxAttribute(prop) && prop.name.text === 'style' && prop.initializer?.getText(source) === '{styles.lyricToolbar}')) toolbar = node
+		ts.forEachChild(node, visit)
+	}
+	visit(source)
+	assert(toolbar, 'The lyric toolbar must remain present')
+	const code = ts.transpileModule(`const toolbar = (${toolbar.getText(source)})`, {
+		compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 },
+	}).outputText
+	const h = runtime(), events = [], writes = []
+	const render = new Function('React', 'View', 'TouchableOpacity', 'MaterialCommunityIcons', 'MenuView', 'styles', 'colors', 'i18n', 'handleLyricsToggle', 'handleLyricsFontSizeDecrease', 'handleLyricsFontSizeIncrease', 'lyricMode', 'hasTranslation', 'PersistStatus', 'toggleLyricDelayControls', 'showLyricDelayControls', `${code}\nreturn toolbar`)
+	for (const hasTranslation of [false, true]) {
+		const tree = render(h.react, 'View', 'TouchableOpacity', 'Icon', 'MenuView', {
+			lyricToolbar: 'toolbar', lyricToolbarButton: 'button', lyricToolbarMenuButton: 'menuButton',
+		}, { text: 'white', primary: 'blue', textMuted: 'gray' }, { t: (key) => key },
+		() => events.push('back'), () => events.push('smaller'), () => events.push('larger'),
+		'bilingual', hasTranslation, { set: (...args) => writes.push(args) }, () => events.push('delay'), true)
+		const controls = tree.props.children
+		assert.equal(controls.length, 4)
+		assert.deepEqual(controls.map((node) => node.type), ['TouchableOpacity', 'View', 'View', 'TouchableOpacity'])
+		const fontMenu = findElement(controls[1], 'MenuView')
+		assert.deepEqual(fontMenu.props.actions.map(({ id }) => id), ['smaller', 'larger'])
+		const modeMenu = findElement(controls[2], 'MenuView')
+		assert.deepEqual(modeMenu.props.actions.map(({ id }) => id), ['original', 'bilingual', 'translation'])
+		assert.deepEqual(modeMenu.props.actions.map(({ state }) => state), ['off', 'on', 'off'])
+		assert.deepEqual(modeMenu.props.actions.map(({ attributes }) => attributes.disabled), [false, !hasTranslation, !hasTranslation])
+		controls[0].props.onPress()
+		for (const event of ['smaller', 'larger']) fontMenu.props.onPressAction({ nativeEvent: { event } })
+		controls[3].props.onPress()
+		assert.deepEqual(controls[3].props.accessibilityState, { expanded: true })
+		for (const event of ['original', 'bilingual', 'translation', 'unknown']) modeMenu.props.onPressAction({ nativeEvent: { event } })
+	}
+	assert.deepEqual(events, ['back', 'smaller', 'larger', 'delay', 'back', 'smaller', 'larger', 'delay'])
+	assert.deepEqual(writes, [...['original', 'bilingual', 'translation'], ...['original', 'bilingual', 'translation']].map((mode) => ['lyric.displayMode', mode]))
 })
 
 await check('the iOS Switch exposes both localized explanations visibly and as its accessibility hint', () => {
@@ -316,7 +400,7 @@ await check('the iOS Switch exposes both localized explanations visibly and as i
 	for (const language of ['zh', 'en']) {
 		h.i18n.locale = language
 		const tree = h.render()
-		const control = findElement(tree, 'Switch')
+		const control = preciseSeekingSwitch(tree)
 		assert.equal(control.props.testID, 'settings.preciseSeeking')
 		assert.equal(control.props.accessibilityLabel, language === 'zh' ? '精确跳转' : 'Precise seeking')
 		assert.equal(control.props.accessibilityHint, descriptions[language])
@@ -326,7 +410,7 @@ await check('the iOS Switch exposes both localized explanations visibly and as i
 		h.unmount()
 	}
 	h.nativeViews.Platform.OS = 'android'
-	assert.equal(findElement(h.render(), 'Switch'), undefined)
+	assert.equal(preciseSeekingSwitch(h.render()), undefined)
 	h.unmount()
 })
 
@@ -342,7 +426,7 @@ await check('changing the actual Switch during playback or pause cannot interrup
 		const calls = h.calls.player.length, sources = h.sourceCalls.length, timers = h.calls.timers.length
 		const diskBefore = [...h.disk].filter(([key]) => key !== 'music.preciseSeeking')
 		const writes = h.storageWrites.length
-		findElement(h.render(), 'Switch').props.onValueChange(!initial)
+		preciseSeekingSwitch(h.render()).props.onValueChange(!initial)
 		await flush()
 		assert.equal(h.calls.player.length, calls)
 		assert.equal(h.sourceCalls.length, sources)
@@ -619,7 +703,7 @@ await check('pause and native Stop during source resolution retain the selected 
 			h.facade.observeNativeTransport('stop')
 		}
 		h.persistence.set('music.preciseSeeking', true)
-		pending.resolve({ url: 'https://media.example/selected.mp3', wasCached: false })
+		pending.resolve({ url: 'https://media.example/selected.mp3', wasCached: false, headers: { Authorization: 'retained' } })
 		await selecting
 		assert.equal(h.count('play'), 0)
 		assert.equal(h.player.playing, false)

@@ -4,24 +4,18 @@ import { logError, logInfo } from '@/helpers/logger'
 import myTrackPlayer, {
 	autoCacheLocalStore,
 	isCachedIconVisibleStore,
-	musicApiSelectedStore,
-	musicApiStore,
 	nowApiState,
 	songsNumsToLoadStore,
 	useCurrentQuality,
 } from '@/helpers/trackPlayerIndex'
 import { useThemeColors, useThemeMode } from '@/hooks/useAppTheme'
-import { createMusicApiFromScript, fetchScriptFromUrl } from '@/helpers/userApi/importMusicSource'
 import PersistStatus from '@/store/PersistStatus'
 import i18n, { changeLanguage, nowLanguage } from '@/utils/i18n'
-import { GlobalState } from '@/utils/stateMapper'
 import { showToast } from '@/utils/utils'
 import { MenuView } from '@react-native-menu/menu'
 import Constants from 'expo-constants'
-import * as DocumentPicker from 'expo-document-picker'
-import { File } from 'expo-file-system'
 import { useRouter } from 'expo-router'
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import {
 	ActivityIndicator,
 	Alert,
@@ -38,6 +32,7 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Toast, { BaseToast, ErrorToast } from 'react-native-toast-message'
+import appIcon from '@/assets/144.png'
 const QUALITY_OPTIONS = ['128k', '320k', 'flac']
 const CURRENT_VERSION = Constants.expoConfig?.version ?? '未知版本'
 
@@ -54,12 +49,6 @@ type SettingItem = {
 		}
 	| { type: 'link' | 'value' | 'custom'; value?: string }
 )
-
-// 将GlobalState实例移到组件外部
-const cooldownStore = new GlobalState<number>(0) // 冷却时间（秒）
-const sourceStatusStore = new GlobalState<
-	Record<string, { status: string; error?: string; url?: string }>
->({}) // 音源状态存储
 
 // eslint-disable-next-line react/prop-types
 const MusicQualityMenu = ({ currentQuality, onSelectQuality }) => {
@@ -87,296 +76,6 @@ const MusicQualityMenu = ({ currentQuality, onSelectQuality }) => {
 		</MenuView>
 	)
 }
-// eslint-disable-next-line react/prop-types
-const MusicSourceMenu = ({ isDelete, onSelectSource }) => {
-	const colors = useThemeColors()
-	const styles = useMemo(() => createStyles(colors), [colors])
-	const [sources, setSources] = useState([])
-	const [isLoading, setIsLoading] = useState(false) // 测试状态
-	const cooldown = cooldownStore.useValue() // 使用useValue获取当前值
-	const sourceStatus = sourceStatusStore.useValue() // 使用GlobalState获取音源状态
-	const selectedApi = musicApiSelectedStore.useValue()
-	const musicApis = musicApiStore.useValue()
-
-	useEffect(() => {
-		if (musicApis && Array.isArray(musicApis)) {
-			setSources(
-				musicApis.map((api) => ({
-					id: api.id,
-					title: api.name,
-				})),
-			)
-		} else {
-			setSources([]) // 如果 musicApis 不是有效数组，设置为空数组
-		}
-	}, [musicApis])
-	useEffect(() => {
-		cooldownStore.setValue(0)
-	}, [])
-	// 处理倒计时
-	useEffect(() => {
-		let timer
-		if (cooldown > 0) {
-			timer = setTimeout(() => {
-				cooldownStore.setValue(cooldown - 1)
-			}, 1000)
-		}
-		return () => clearTimeout(timer)
-	}, [cooldown])
-
-	// 测试单个音源是否可用
-	const testMusicSource = async (musicApi) => {
-		try {
-			logInfo(`开始测试音源: ${musicApi.name}, ID: ${musicApi.id}`)
-
-			// 检查musicApi.getMusicUrl是否存在且为函数
-			if (typeof musicApi.getMusicUrl !== 'function') {
-				logError(`音源 ${musicApi.name} 的 getMusicUrl 不是函数或不存在`, musicApi)
-				return { status: '异常', error: 'getMusicUrl 方法不可用' }
-			}
-
-			// 设置超时
-			const timeoutPromise = new Promise((_, reject) => {
-				setTimeout(() => reject(new Error('请求超时')), 5000)
-			})
-			logInfo(
-				`测试音源详情:`,
-				JSON.stringify({
-					name: musicApi.name,
-					id: musicApi.id,
-					author: musicApi.author,
-					version: musicApi.version,
-				}),
-			)
-
-			// 尝试获取测试歌曲URL
-			// 这里使用了固定的测试歌曲信息，可以根据实际需求修改
-			const testTitle = '稻香'
-			const testArtist = '周杰伦'
-			const testId = '004IArbh3ytHgR'
-
-			logInfo(`测试歌曲信息: ${testTitle} - ${testArtist}, ID: ${testId}`)
-
-			// 按音质降级尝试
-			const qualityOrder = ['128k']
-
-			for (const quality of qualityOrder) {
-				try {
-					logInfo(`尝试获取音源 ${musicApi.name} 的 ${quality} 音质`)
-
-					// 记录函数调用前的参数
-					logInfo(
-						`调用 getMusicUrl 参数: title=${testTitle}, artist=${testArtist}, id=${testId}, quality=${quality}`,
-					)
-
-					const resp_url = await Promise.race([
-						musicApi.getMusicUrl(testTitle, testArtist, testId, quality),
-						timeoutPromise,
-					])
-
-					// 记录返回值
-					logInfo(`音源 ${musicApi.name} 返回结果: ${resp_url}`)
-
-					if (resp_url && resp_url !== '') {
-						// 找到可用音源
-						logInfo(`音源 ${musicApi.name} 测试成功，音质: ${quality}, URL: ${resp_url}`)
-						return { status: '正常', url: resp_url }
-					} else {
-						logInfo(`音源 ${musicApi.name} 返回空URL，音质: ${quality}`)
-					}
-				} catch (err) {
-					// 继续尝试下一个音质
-					logError(`测试音源 ${musicApi.name} ${quality} 音质失败:`, err)
-					logInfo(`错误详情: ${err.message || '未知错误'}`)
-					// 尝试打印错误堆栈
-					if (err.stack) {
-						logInfo(`错误堆栈: ${err.stack}`)
-					}
-				}
-			}
-
-			// 所有音质都尝试失败
-			logInfo(`音源 ${musicApi.name} 所有音质测试均失败`)
-			return { status: '异常', error: '无法获取音乐URL' }
-		} catch (error) {
-			logError(`测试音源 ${musicApi?.name || '未知'} 时发生异常:`, error)
-			if (error.stack) {
-				logInfo(`异常错误堆栈: ${error.stack}`)
-			}
-			return {
-				status: '异常',
-				error: error.message === '请求超时' ? '请求超时' : error.message || '未知错误',
-			}
-		}
-	}
-
-	// 测试所有音源状态
-	const testAllSources = async () => {
-		if (!musicApis || !Array.isArray(musicApis) || musicApis.length === 0) {
-			logInfo('没有可用的音源可测试')
-			return
-		}
-
-		logInfo(`开始测试所有音源，共 ${musicApis.length} 个`)
-		setIsLoading(true)
-		const statusResults = { ...sourceStatus } // 复制当前状态作为基础
-
-		for (const api of musicApis) {
-			logInfo(`开始测试音源: ${api.name}`)
-			statusResults[api.id] = { status: '测试中...' }
-			sourceStatusStore.setValue({ ...statusResults }) // 更新到GlobalState
-			const reloadedApi = await myTrackPlayer.reloadMusicApi(api, true)
-			const result = await testMusicSource(reloadedApi)
-			statusResults[api.id] = result
-			sourceStatusStore.setValue({ ...statusResults }) // 更新到GlobalState
-			logInfo(`音源 ${api.name} 测试结果: ${result.status}`)
-		}
-
-		logInfo('所有音源测试完成')
-		// 设置60秒冷却时间
-		cooldownStore.setValue(60)
-		setIsLoading(false)
-	}
-
-	const handlePressAction = async (id: string) => {
-		// 如果点击的是测试音源按钮，则不关闭菜单并触发测试
-		if (id === 'test_sources') {
-			// 如果在冷却中，不执行操作
-			if (cooldown > 0) return
-			testAllSources()
-			return
-		}
-		// 否则执行正常的音源选择逻辑
-		onSelectSource(id)
-	}
-
-	// 获取状态对应的图标/文本
-	const getStatusIndicator = (sourceId) => {
-		if (!sourceStatus[sourceId]) {
-			return ''
-		}
-
-		switch (sourceStatus[sourceId].status) {
-			case '正常':
-				return ' ✅'
-			case '异常':
-				return ' ❌'
-			case '测试中...':
-				return ' 🔄'
-			default:
-				return ''
-		}
-	}
-
-	// 格式化倒计时显示
-	const formatCooldown = () => {
-		const minutes = Math.floor(cooldown / 60)
-		const seconds = cooldown % 60
-		return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`
-	}
-
-	// 创建音源列表actions
-	const sourceActions = sources.map((source) => ({
-		id: source.id,
-		title: isDelete
-			? `${i18n.t('settings.actions.delete.delete')} ${source.title}`
-			: `${source.title}${getStatusIndicator(source.id)}`,
-		state: isDelete ? 'off' : selectedApi && selectedApi.id === source.id ? 'on' : 'off',
-		attributes: isDelete ? { destructive: true, disabled: false } : undefined,
-	}))
-
-	// 添加测试音源的按钮（仅在非删除模式下）
-	if (!isDelete) {
-		sourceActions.push({
-			id: 'test_sources',
-			title: isLoading
-				? '测试中...'
-				: cooldown > 0
-					? `请勿频繁测试 ${formatCooldown()} `
-					: i18n.t('settings.items.testSources') || '测试所有音源',
-			attributes: cooldown > 0 || isLoading ? { destructive: false, disabled: true } : undefined,
-			state: 'off',
-		})
-	}
-
-	return (
-		<MenuView
-			onPressAction={({ nativeEvent: { event } }) => handlePressAction(event)}
-			actions={sourceActions as any}
-		>
-			<TouchableOpacity style={[styles.menuTrigger]}>
-				<Text style={[styles.menuTriggerText]}>
-					{isDelete
-						? i18n.t('settings.actions.delete.selectDelete')
-						: selectedApi
-							? `${selectedApi.name}`
-							: i18n.t('settings.items.selectSource')}
-				</Text>
-			</TouchableOpacity>
-		</MenuView>
-	)
-}
-
-const importMusicSourceFromUrl = async () => {
-	Alert.prompt(
-		'导入音源',
-		'请输入音源 URL',
-		[
-			{
-				text: '取消',
-				onPress: () => logInfo('取消导入'),
-				style: 'cancel',
-			},
-			{
-				text: '确定',
-				onPress: async (url) => {
-					if (!url) {
-						Alert.alert('错误', 'URL 不能为空')
-						return
-					}
-
-					try {
-						const sourceCode = await fetchScriptFromUrl(url)
-						logInfo('获取到的源代码:', sourceCode)
-						const musicApi = await createMusicApiFromScript(sourceCode)
-						myTrackPlayer.addMusicApi(musicApi)
-						return
-					} catch (error) {
-						const errMsg = error instanceof Error ? error.message : String(error)
-						logError('导入音源失败:', errMsg)
-						Alert.alert('错误', `导入音源失败: ${errMsg}`)
-					}
-				},
-			},
-		],
-		'plain-text',
-	)
-}
-const importMusicSourceFromFile = async () => {
-	try {
-		const result = await DocumentPicker.getDocumentAsync({
-			type: 'text/javascript',
-			copyToCacheDirectory: false,
-		})
-
-		if (result.canceled === true) {
-			logInfo('User canceled document picker')
-			return
-		}
-
-		// logInfo('File selected:', result.assets[0].uri)
-		const fileContents = await new File(result.assets[0].uri).text()
-		logInfo('File contents:', fileContents)
-		const musicApi = await createMusicApiFromScript(fileContents)
-		myTrackPlayer.addMusicApi(musicApi)
-		return
-	} catch (err) {
-		const errMsg = err instanceof Error ? (err as Error).message : String(err)
-		logError('Error importing music source:', errMsg)
-		Alert.alert('导入失败', `无法导入音源: ${errMsg}`)
-		logError('导入音源失败: ' + errMsg)
-	}
-}
 const SettingModal = () => {
 	const colors = useThemeColors()
 	const { themeMode, setThemeMode } = useThemeMode()
@@ -387,9 +86,11 @@ const SettingModal = () => {
 	const apiState = nowApiState.useValue()
 	const language = nowLanguage.useValue()
 	const autoCacheLocal = autoCacheLocalStore.useValue()
+	const preloadNextTrack = PersistStatus.useValue('music.preloadNextTrack', true) === true
 	const isCachedIconVisible = isCachedIconVisibleStore.useValue()
 	const songsNumsToLoad = songsNumsToLoadStore.useValue()
 	const preciseSeeking = PersistStatus.useValue('music.preciseSeeking', false) === true
+	const bluetoothLyrics = PersistStatus.useValue('music.bluetoothLyrics', false) === true
 	const themeLabel = useMemo(() => {
 		switch (themeMode) {
 			case 'light':
@@ -404,7 +105,7 @@ const SettingModal = () => {
 		{
 			title: i18n.t('settings.sections.appInfo'),
 			data: [
-				{ id: '1', title: 'CyMusic', type: 'link', icon: require('@/assets/144.png') },
+				{ id: '1', title: 'CyMusic', type: 'link', icon: appIcon },
 				{ id: '2', title: i18n.t('settings.items.version'), type: 'value', value: CURRENT_VERSION },
 				{ id: '3', title: i18n.t('settings.items.checkUpdate'), type: 'value' },
 				{ id: '5', title: i18n.t('settings.items.projectLink'), type: 'value', value: '' },
@@ -435,6 +136,12 @@ const SettingModal = () => {
 					title: i18n.t('settings.items.autoCacheLocal'),
 					type: 'value',
 				},
+				{ id: 'preloadNextTrack', title: i18n.t('settings.items.preloadNextTrack'), type: 'value' },
+				{
+					id: 'bluetoothLyrics', title: i18n.t('settings.items.bluetoothLyrics'), type: 'switch',
+					description: i18n.t('settings.descriptions.bluetoothLyrics'), value: bluetoothLyrics,
+					onValueChange: (value: boolean) => PersistStatus.set('music.bluetoothLyrics', value),
+				},
 				...(Platform.OS === 'ios'
 					? [
 						{
@@ -452,7 +159,7 @@ const SettingModal = () => {
 		{
 			title: i18n.t('settings.sections.customSource'),
 			data: [
-				{ id: '11', title: i18n.t('settings.items.switchSource'), type: 'custom' },
+				{ id: 'sourceManagement', title: i18n.t('settings.items.sourceManagement'), type: 'link' },
 				{
 					id: '7',
 					title: i18n.t('settings.items.sourceStatus'),
@@ -462,8 +169,6 @@ const SettingModal = () => {
 							? i18n.t('settings.items.normal')
 							: i18n.t('settings.items.exception'),
 				},
-				{ id: '12', title: i18n.t('settings.items.deleteSource'), type: 'value', value: '' },
-				{ id: '8', title: i18n.t('settings.items.importSource'), type: 'value' },
 			],
 		},
 		{
@@ -471,28 +176,6 @@ const SettingModal = () => {
 			data: [{ id: '10', title: i18n.t('settings.items.currentQuality'), type: 'value' }],
 		},
 	]
-	const importMusicSourceMenu = (
-		<MenuView
-			onPressAction={({ nativeEvent: { event } }) => {
-				switch (event) {
-					case 'file':
-						importMusicSourceFromFile()
-						break
-					case 'url':
-						importMusicSourceFromUrl()
-						break
-				}
-			}}
-			actions={[
-				{ id: 'file', title: i18n.t('settings.actions.import.fromFile') },
-				{ id: 'url', title: i18n.t('settings.actions.import.fromUrl') },
-			]}
-		>
-			<TouchableOpacity style={styles.menuTrigger}>
-				<Text style={styles.menuTriggerText}>{i18n.t('settings.actions.import.title')}</Text>
-			</TouchableOpacity>
-		</MenuView>
-	)
 	const toggleAutoCacheLocalMenu = (
 		<MenuView
 			onPressAction={({ nativeEvent: { event } }) => {
@@ -517,6 +200,19 @@ const SettingModal = () => {
 						? '             ' + i18n.t('settings.actions.autoCacheLocal.yes')
 						: '             ' + i18n.t('settings.actions.autoCacheLocal.no')}
 				</Text>
+			</TouchableOpacity>
+		</MenuView>
+	)
+	const togglePreloadNextTrackMenu = (
+		<MenuView
+			onPressAction={({ nativeEvent: { event } }) => myTrackPlayer.togglePreloadNextTrack(event === 'on')}
+			actions={[
+				{ id: 'on', title: i18n.t('settings.actions.preloadNextTrack.yes') },
+				{ id: 'off', title: i18n.t('settings.actions.preloadNextTrack.no') },
+			]}
+		>
+			<TouchableOpacity style={styles.menuTrigger}>
+				<Text style={styles.menuTriggerText}>{preloadNextTrack ? i18n.t('settings.actions.preloadNextTrack.yes') : i18n.t('settings.actions.preloadNextTrack.no')}</Text>
 			</TouchableOpacity>
 		</MenuView>
 	)
@@ -587,9 +283,6 @@ const SettingModal = () => {
 			console.error(error)
 		}
 	}
-	const handleSelectSource = (sourceId) => {
-		myTrackPlayer.setMusicApiAsSelectedById(sourceId)
-	}
 	const changeLanguageMenu = (
 		<MenuView
 			onPressAction={({ nativeEvent: { event } }) => {
@@ -643,9 +336,6 @@ const SettingModal = () => {
 		</MenuView>
 	)
 
-	const handleDeleteSource = (sourceId) => {
-		myTrackPlayer.deleteMusicApiById(sourceId)
-	}
 	const checkForUpdates = async () => {
 		setIsLoading(true)
 		const timeoutPromise = new Promise((_, reject) =>
@@ -732,6 +422,10 @@ const SettingModal = () => {
 					key={item.id}
 					style={itemStyle}
 					onPress={() => {
+						if (item.id === 'sourceManagement') {
+							router.push('/(modals)/sourceManagement')
+							return
+						}
 						if (item.title === i18n.t('settings.items.viewLogs')) {
 							router.push('/(modals)/logScreen')
 						}
@@ -752,8 +446,6 @@ const SettingModal = () => {
 										},
 									],
 								)
-							} else if (item.title === i18n.t('settings.items.importSource')) {
-								// importMusicSourceFromFile()
 							} else if (item.title === 'CyMusic') {
 								showToast('CyMusic', 'success')
 							}
@@ -772,16 +464,10 @@ const SettingModal = () => {
 						{item.title === i18n.t('settings.items.currentQuality') && (
 							<MusicQualityMenu currentQuality={currentQuality} onSelectQuality={setCurrentQuality} />
 						)}
-						{item.title === i18n.t('settings.items.switchSource') && (
-							<MusicSourceMenu isDelete={false} onSelectSource={handleSelectSource} />
-						)}
-						{item.title === i18n.t('settings.items.deleteSource') && (
-							<MusicSourceMenu isDelete={true} onSelectSource={handleDeleteSource} />
-						)}
-						{item.title === i18n.t('settings.items.importSource') && importMusicSourceMenu}
 						{(item.type === 'link' || item.title === i18n.t('settings.items.projectLink')) &&
 							!item.icon && <Text style={styles.arrowRight}>{'>'}</Text>}
 						{item.title === i18n.t('settings.items.autoCacheLocal') && toggleAutoCacheLocalMenu}
+						{item.title === i18n.t('settings.items.preloadNextTrack') && togglePreloadNextTrackMenu}
 						{item.title === i18n.t('settings.items.changeLanguage') && changeLanguageMenu}
 						{item.title === i18n.t('settings.items.theme') && themeMenu}
 						{item.title === i18n.t('settings.items.isCachedIconVisible') &&

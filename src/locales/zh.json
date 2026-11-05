@@ -14,7 +14,10 @@
 			"clearCache": "清空缓存",
 			"viewLogs": "查看日志",
 			"clearPlaylist": "清空待播清单",
-			"autoCacheLocal": "自动缓存歌曲到本地",
+		"autoCacheLocal": "自动缓存歌曲到本地",
+		"preloadNextTrack": "提前缓存下一首",
+		"bluetoothLyrics": "蓝牙歌词（兼容模式）",
+		"sourceManagement": "音源管理",
 			"preciseSeeking": "精确跳转",
 			"switchSource": "切换音源",
 			"selectSource": "选择音源",
@@ -33,6 +36,7 @@
 			"songsNumsToLoad": "首页播放歌曲数量"
 		},
 		"descriptions": {
+			"bluetoothLyrics": "将当前歌词附加到系统歌曲标题，会影响锁屏和 CarPlay 显示。默认关闭，设备是否显示取决于车机。",
 			"preciseSeeking": "改善部分 FLAC 快进后的音频与歌词不同步。开启后可能需要加载完整音频，播放前等待更久。切换歌曲后生效。"
 		},
 		"actions": {
@@ -41,7 +45,7 @@
 				"fromFile": "从文件导入",
 				"fromUrl": "从URL导入"
 			},
-			"autoCacheLocal": {
+		"autoCacheLocal": {
 				"yes": "是",
 				"no": "否"
 			},
@@ -81,6 +85,10 @@
 				"delete": "删除",
 				"selectDelete": "选择删除"
 			}
+		},
+		"preloadNextTrack": {
+			"yes": "开启",
+			"no": "关闭"
 		},
 		"placeholders": {
 			"enterSourceUrl": "请输入音源 URL"
@@ -144,6 +152,10 @@
 		"addToPlaylist": "添加到歌单",
 		"showLyrics": "查看歌词",
 		"showAlbum": "显示专辑",
+		"showComments": "查看评论",
+		"showTranslation": "显示翻译",
+		"lyricFontSize": "歌词字号",
+		"lyricMode": { "original": "原文", "bilingual": "双语", "translation": "仅译文" },
 		"like": "喜欢",
 		"playingList": "播放列表",
 		"minutes": "分钟",

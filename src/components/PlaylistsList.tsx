@@ -8,14 +8,17 @@ import i18n from '@/utils/i18n'
 import { useMemo } from 'react'
 import { Alert, FlatList, FlatListProps, Text, View } from 'react-native'
 import { Image } from 'expo-image'
+import { getPlaylistReference } from '@/helpers/userApi/remotePlaylist'
 type PlaylistsListProps = {
 	playlists: Playlist[]
 	onPlaylistPress: (playlist: Playlist) => void
+	onRefreshPlaylist?: (playlist: Playlist) => Promise<void>
 } & Partial<FlatListProps<Playlist>>
 
 export const PlaylistsList = ({
 	playlists,
 	onPlaylistPress: handlePlaylistPress,
+	onRefreshPlaylist,
 	...flatListProps
 }: PlaylistsListProps) => {
 	const utilsStyles = useUtilsStyles()
@@ -73,12 +76,21 @@ export const PlaylistsList = ({
 							// 删除失败，显示错误信息
 							Alert.alert('错误', result)
 						}
-					} catch (error) {
+					} catch {
 						// 处理可能发生的错误
 						Alert.alert('错误', 'An error occurred while deleting the playlist')
 					}
 				},
 			},
+		])
+	}
+	const showMore = (playlist: Playlist, refresh: () => Promise<void>) => {
+		Alert.alert(playlist.title, '歌单操作', [
+			...(getPlaylistReference(playlist) && onRefreshPlaylist ? [{ text: '刷新远端歌单', onPress: () => {
+				void refresh()
+			} }] : []),
+			{ text: '删除歌单', style: 'destructive', onPress: () => showDeleteAlert(playlist) },
+			{ text: '取消', style: 'cancel' },
 		])
 	}
 	return (
@@ -88,11 +100,13 @@ export const PlaylistsList = ({
 			ListFooterComponent={itemDivider}
 			ListEmptyComponent={emptyListComponent}
 			data={filteredPlaylist}
+			keyExtractor={(playlist) => playlist.id}
 			renderItem={({ item: playlist }) => (
 				<PlaylistListItem
 					playlist={playlist}
 					onPress={() => handlePlaylistPress(playlist)}
-					onLongPress={() => showDeleteAlert(playlist)}
+					onRefresh={onRefreshPlaylist}
+					onMore={playlist.id === 'favorites' || playlist.id === 'local' ? undefined : showMore}
 				/>
 			)}
 			{...flatListProps}

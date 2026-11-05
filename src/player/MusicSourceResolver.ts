@@ -1,218 +1,327 @@
 import { fakeAudioMp3Uri } from '@/constants/images'
 import { resolveLocalFile } from '@/helpers/localFile'
-import { logError, logInfo } from '@/helpers/logger'
-import PersistStatus from '@/store/PersistStatus'
+import { logError } from '@/helpers/logger'
 import { showToast } from '@/utils/utils'
-import { isCached, getLocalFilePath } from './CacheManager'
-import { musicApiSelectedStore, nowApiState, qualityStore } from './PlayerStore'
+import { cacheIdentity, findCachedPath, getCacheFileUri, downloadToCache } from './CacheManager'
+import {
+	musicApiSelectedStore,
+	musicApiStore,
+	nowApiState,
+	qualityStore,
+	preloadNextTrackStore,
+} from './PlayerStore'
+import { sourceId, songKey, type CacheIdentity } from './sourceIdentity'
+import { resolveQQMid } from './sourceResolver/qqMatch'
+import {
+	isLxSource,
+	loadResolverSource,
+	releaseResolverRuntime,
+	withSourceRuntimeLock,
+} from './sourceResolver/runtime'
+import type { Track } from './types'
+import { toMediaItem, type MediaItemPlaybackOptions } from './mediaItem'
+import { onPreparationInvalidated } from './preparationInvalidation'
 
+export { withSourceRuntimeLock } from './sourceResolver/runtime'
+export type ResolveSourceRequestType = 'current' | 'preload'
 export type SourceResult = {
 	url: string
 	wasCached: boolean
+	headers?: Record<string, string>
+	userAgent?: string
+	cacheIdentity?: CacheIdentity
+}
+type ResolveSourceOptions = { requestType?: ResolveSourceRequestType; signal?: AbortSignal }
+
+export type PreparedNextTrack = {
+	generation: number
+	key: string
+	track: Track
+	cacheIdentity: CacheIdentity
+	mediaItem: ReturnType<typeof toMediaItem>
+}
+let generation = 0
+let preparation: {
+	controller: AbortController
+	promise: Promise<PreparedNextTrack | null>
+	key: string
+} | null = null
+let prepared: PreparedNextTrack | null = null
+let currentRequests = 0
+let currentStreamHasPriority = false
+
+/** Set while the current remote stream is loading/buffering; clear once output is stable. */
+export function setCurrentStreamPriority(priority: boolean) {
+	currentStreamHasPriority = priority
+	if (priority) cancelPreparedNextTrack()
 }
 
-export type ResolveSourceRequestType = 'current' | 'preload'
+export function cancelPreparedNextTrack() {
+	generation++
+	preparation?.controller.abort()
+	preparation = null
+	prepared = null
+}
+onPreparationInvalidated(cancelPreparedNextTrack)
 
-type ResolveSourceOptions = {
-	requestType?: ResolveSourceRequestType
+const preferenceKey = () =>
+	JSON.stringify([
+		sourceId(musicApiSelectedStore.getValue()),
+		qualityStore.getValue(),
+		(musicApiStore.getValue() || []).filter((api) => api.enabled !== false).map(sourceId),
+	])
+const preparationKey = (item: IMusic.IMusicItem) => JSON.stringify([songKey(item), preferenceKey()])
+
+export function isPreparedNextTrackValid(value: PreparedNextTrack): boolean {
+	return (
+		prepared === value &&
+		value.generation === generation &&
+		value.key === preparationKey(value.track as IMusic.IMusicItem) &&
+		preloadNextTrackStore.getValue()
+	)
 }
 
-type MusicUrlRequestContext = {
-	requestKey: string
-	requestType: ResolveSourceRequestType
-	timeoutMs: number
-}
-
-const preloadCache = new Map<string, string>()
-const CURRENT_SOURCE_REQUEST_TIMEOUT_MS = 5000
-const PRELOAD_SOURCE_REQUEST_TIMEOUT_MS = 12000
-
-const isCurrentSourceRequest = (requestType: ResolveSourceRequestType) =>
-	requestType === 'current'
-
-const getSourceRequestTimeoutMs = (requestType: ResolveSourceRequestType) =>
-	isCurrentSourceRequest(requestType)
-		? CURRENT_SOURCE_REQUEST_TIMEOUT_MS
-		: PRELOAD_SOURCE_REQUEST_TIMEOUT_MS
-
-const getMusicItemSourceKey = (item: IMusic.IMusicItem) =>
-	String(item.platform || item.source || 'unknown').replace(/\s+/g, '_')
-
-const createTimeoutPromise = (timeoutMs: number) =>
-	new Promise<never>((_, reject) => {
-		setTimeout(() => reject(new Error('请求超时')), timeoutMs)
+/** One slot only. The caller must wait for current output/buffering before starting. */
+export function prepareNextTrack(
+	item: IMusic.IMusicItem,
+	token: string,
+	playbackOptions?: MediaItemPlaybackOptions,
+): Promise<PreparedNextTrack | null> {
+	const key = JSON.stringify([
+		preparationKey(item),
+		token,
+		playbackOptions?.preciseSeeking === true,
+	])
+	if (preparation?.key === key) return preparation.promise
+	cancelPreparedNextTrack()
+	if (currentRequests || currentStreamHasPriority || !preloadNextTrackStore.getValue())
+		return Promise.resolve(null)
+	const ownGeneration = generation
+	const controller = new AbortController()
+	const preferences = preferenceKey()
+	const valid = () =>
+		!controller.signal.aborted &&
+		generation === ownGeneration &&
+		preferences === preferenceKey() &&
+		preloadNextTrackStore.getValue()
+	const promise = (async () => {
+		try {
+			const source = await resolveSource(item, {
+				requestType: 'preload',
+				signal: controller.signal,
+			})
+			if (!valid() || source.url === fakeAudioMp3Uri) return null
+			// A downloaded manifest is not a self-contained local audio track.
+			if (
+				item.isLiveStream ||
+				/\.(m3u8|mpd)(?:[?#]|$)/i.test(source.url) ||
+				/mpegurl|dash\+xml/i.test(item.contentType || '')
+			)
+				return null
+			const identity = source.cacheIdentity ?? cacheIdentity(item)
+			let url = source.url
+			if (source.wasCached) url = getCacheFileUri(url)
+			else if (/^https?:\/\//i.test(url)) {
+				const path = await downloadToCache(
+					{ ...item, ...source },
+					{ identity, signal: controller.signal },
+				)
+				url = getCacheFileUri(path)
+			}
+			if (!valid() || !url.startsWith('file://')) return null
+			const track: Track = {
+				...item,
+				url,
+				headers: source.headers,
+				userAgent: source.userAgent,
+				cacheSourceId: identity.sourceId,
+				cacheQuality: identity.quality,
+			}
+			const value: PreparedNextTrack = {
+				generation: ownGeneration,
+				key: preparationKey(item),
+				track,
+				cacheIdentity: identity,
+				mediaItem: toMediaItem(track, token, false, {
+					...playbackOptions,
+					preparedGeneration: ownGeneration,
+				}),
+			}
+			prepared = value
+			return value
+		} catch {
+			return null
+		}
+	})()
+	preparation = { controller, promise, key }
+	void promise.then((value) => {
+		if (!value && preparation?.promise === promise) preparation = null
 	})
+	return promise
+}
 
-const createSourceRequestKey = (
+// Compatibility for existing callers; preparation includes a complete disk download.
+export const preloadTrack = (item: IMusic.IMusicItem) => prepareNextTrack(item, 'preload')
+export const preloadSource = preloadTrack
+export const getPreloadedUrl = (item: IMusic.IMusicItem) =>
+	prepared &&
+	isPreparedNextTrackValid(prepared) &&
+	songKey(prepared.track as IMusic.IMusicItem) === songKey(item)
+		? prepared.track.url
+		: undefined
+
+function assertActive(signal: AbortSignal) {
+	if (signal.aborted) throw new Error('SOURCE_CANCELLED')
+}
+
+async function resolveUncached(
 	item: IMusic.IMusicItem,
 	requestType: ResolveSourceRequestType,
-) =>
-	`source_${requestType}_${getMusicItemSourceKey(item)}_${item.id}_${Date.now().toString(36)}_${Math.random()
-		.toString(36)
-		.slice(2, 8)}`
-
-const getSourceRequestLogPrefix = (
-	requestType: ResolveSourceRequestType,
-	requestKey: string,
-) => `[sourceResolver][${requestType}][requestKey=${requestKey}]`
-
-function makePreloadKey(item: IMusic.IMusicItem): string {
-	return `${getMusicItemSourceKey(item)}://${item.id}`
-}
-
-export const getPreloadedUrl = (item: IMusic.IMusicItem): string | undefined => {
-	return preloadCache.get(makePreloadKey(item))
-}
-
-export const preloadSource = async (item: IMusic.IMusicItem): Promise<void> => {
-	const key = makePreloadKey(item)
-	if (preloadCache.has(key)) return
-	try {
-		const result = await resolveSource(item, { requestType: 'preload' })
-		if (result.url && !result.url.includes('fake')) {
-			preloadCache.set(key, result.url)
-			if (preloadCache.size > 10) {
-				const firstKey = preloadCache.keys().next().value
-				if (firstKey) preloadCache.delete(firstKey)
-			}
-		}
-	} catch {
-		// preload failures are silent
-	}
-}
-
-const setQuality = (quality: IMusic.IQualityKey) => {
-	qualityStore.setValue(quality)
-	PersistStatus.set('music.quality', quality)
-}
-
-export const resolveSource = async (
-	musicItem: IMusic.IMusicItem,
-	options: ResolveSourceOptions = {},
-): Promise<SourceResult> => {
-	const preloadKey = makePreloadKey(musicItem)
-	const requestType = options.requestType ?? 'current'
-
-	const localFile = await resolveLocalFile(musicItem.url)
-	if (localFile.status !== 'nonlocal') {
-		if (localFile.status !== 'resolved') {
-			if (isCurrentSourceRequest(requestType)) {
-				logError('本地文件无法访问:', musicItem.url, localFile.reason)
-				showToast('错误', '本地文件不存在，请删除并重新缓存或导入。', 'error')
-			}
-			return { url: fakeAudioMp3Uri, wasCached: false }
-		}
-		preloadCache.delete(preloadKey)
-		return { url: localFile.fileUri, wasCached: false }
-	}
-
-	const cached = await isCached(musicItem)
-	if (cached) {
-		const localPath = getLocalFilePath(musicItem)
-		preloadCache.delete(preloadKey)
-		logInfo('使用缓存的音频路径播放:', localPath)
-		return { url: localPath, wasCached: true }
-	}
-
-	// 只在本地与磁盘缓存都未命中时，才复用预加载的远端音源
-	const preloaded = getPreloadedUrl(musicItem)
-	if (preloaded) {
-		logInfo(`[sourceResolver][${requestType}] 使用预加载的音源:`, preloaded)
-		preloadCache.delete(preloadKey)
-		return { url: preloaded, wasCached: false }
-	}
-
-	if (!musicItem.url || musicItem.url === 'Unknown' || musicItem.url.includes('fake')) {
-		const nowMusicApi = musicApiSelectedStore.getValue()
-		if (nowMusicApi == null) {
-			if (isCurrentSourceRequest(requestType)) {
-				showToast('错误', '获取音乐失败，请先导入音源。', 'error')
-			}
-			return { url: fakeAudioMp3Uri, wasCached: false }
-		}
-
-		const requestKey = createSourceRequestKey(musicItem, requestType)
-		const logPrefix = getSourceRequestLogPrefix(requestType, requestKey)
-		const timeoutMs = getSourceRequestTimeoutMs(requestType)
-
+	signal: AbortSignal,
+): Promise<SourceResult> {
+	const selected = musicApiSelectedStore.getValue()
+	if (!selected) throw new Error('请先导入音源')
+	const mid = await resolveQQMid(item, signal)
+	assertActive(signal)
+	return withSourceRuntimeLock(async () => {
+		assertActive(signal)
+		const apis = [
+			selected,
+			...(musicApiStore.getValue() || []).filter((api) => api.id !== selected.id),
+		].filter((api) => api.enabled !== false)
+		const qualities: IMusic.IQualityKey[] = ['flac', '320k', '128k']
+		const requestedQuality = qualityStore.getValue()
+		let touchedRuntime = false
 		try {
-			const qualityOrder: IMusic.IQualityKey[] = ['flac', '320k', '128k']
-			let currentQualityIndex = qualityOrder.indexOf(qualityStore.getValue())
-			let resp_url: string | null = null
-
-			logInfo(`${logPrefix} 开始请求音源: ${musicItem.title} - ${musicItem.artist}`)
-
-			while (currentQualityIndex < qualityOrder.length && !resp_url) {
-				const currentQuality = qualityOrder[currentQualityIndex]
+			for (const api of apis) {
+				assertActive(signal)
+				let loaded: IMusic.MusicApi
 				try {
-					resp_url = await Promise.race([
-						nowMusicApi.getMusicUrl(
-							musicItem.title,
-							musicItem.artist,
-							musicItem.id,
-							currentQuality,
-							{ requestKey, requestType, timeoutMs } as MusicUrlRequestContext,
-						),
-						createTimeoutPromise(timeoutMs),
-					])
-					if (!resp_url || resp_url === '') {
-						if (isCurrentSourceRequest(requestType)) {
-							logInfo(
-								`${logPrefix} ${currentQuality}音质无可用链接，尝试下一个音质`,
-							)
-						}
-						currentQualityIndex++
-						resp_url = null
-						continue
+					if (isLxSource(api)) touchedRuntime = true
+					loaded = await loadResolverSource(api)
+				} catch {
+					continue
+				}
+				for (const quality of qualities.slice(Math.max(0, qualities.indexOf(requestedQuality)))) {
+					assertActive(signal)
+					const identity = { sourceId: sourceId(api), quality }
+					const cached = await findCachedPath(item, identity)
+					assertActive(signal)
+					if (cached) return { url: cached, wasCached: true, cacheIdentity: identity }
+					try {
+						const result = await loaded.getMusicUrl(item.title, item.artist, mid, quality, {
+							requestKey: `${requestType}_${Date.now()}_${Math.random()}`,
+							requestType,
+							timeoutMs: requestType === 'current' ? 5000 : 12000,
+							signal,
+						})
+						assertActive(signal)
+						const source = typeof result === 'string' ? { url: result } : result
+						if (source && /^https?:\/\/\S+$/i.test(source.url))
+							return {
+								url: source.url,
+								headers: source.headers,
+								userAgent: source.userAgent,
+								wasCached: false,
+								cacheIdentity: identity,
+							}
+					} catch (error) {
+						if (signal.aborted) throw error
 					}
-					if (
-						isCurrentSourceRequest(requestType) &&
-						currentQuality !== qualityStore.getValue()
-					) {
-						showToast('提示', `已自动切换至${currentQuality}音质`, 'info')
-						setQuality(currentQuality)
-					}
-					logInfo(`${logPrefix} 成功获取${currentQuality}音质的音乐URL:`, resp_url)
-				} catch (error) {
-					if (isCurrentSourceRequest(requestType)) {
-						logInfo(`${logPrefix} ${currentQuality}音质无可用链接(catch),尝试下一个音质`)
-					}
-					const errMsg = error instanceof Error ? error.message : String(error)
-					if (isCurrentSourceRequest(requestType)) {
-						logError(`${logPrefix} (catch error): ${errMsg}`)
-					}
-					currentQualityIndex++
 				}
 			}
-
-			if (!resp_url) {
-				if (isCurrentSourceRequest(requestType)) {
-					nowApiState.setValue('异常')
-					throw new Error('无法获取任何音质的音乐，请稍后重试。')
-				}
-				return { url: fakeAudioMp3Uri, wasCached: false }
+			throw new Error('无法获取可播放音源')
+		} finally {
+			// Fallback closures belong to a runtime. Restore the selected closure before unlocking.
+			if (touchedRuntime) {
+				const latest = musicApiSelectedStore.getValue()
+				if (latest && isLxSource(latest)) {
+					const restored = await loadResolverSource(latest)
+					if (musicApiSelectedStore.getValue() === latest) musicApiSelectedStore.setValue(restored)
+				} else releaseResolverRuntime()
 			}
-			logInfo(`${logPrefix} 最终的音乐 URL:`, resp_url)
-			if (isCurrentSourceRequest(requestType)) {
-				nowApiState.setValue('正常')
-			}
-			return { url: resp_url, wasCached: false }
-		} catch (error) {
-			if (isCurrentSourceRequest(requestType)) {
-				nowApiState.setValue('异常')
-			}
-			const errMsg = error instanceof Error ? error.message : String(error)
-			if (isCurrentSourceRequest(requestType)) {
-				logError(`${logPrefix} 获取音乐 URL 失败: ${errMsg}`)
-				const errorMessage =
-					errMsg === '请求超时'
-						? '获取音乐超时，请稍后重试。'
-						: errMsg || '获取音乐失败，请稍后重试。'
-				showToast(errorMessage, '', 'error')
-			}
-			return { url: fakeAudioMp3Uri, wasCached: false }
 		}
-	}
+	}, requestType)
+}
 
-	return { url: musicItem.url, wasCached: false }
+export async function resolveSource(
+	item: IMusic.IMusicItem,
+	options: ResolveSourceOptions = {},
+): Promise<SourceResult> {
+	const requestType = options.requestType ?? 'current'
+	const isCurrent = requestType === 'current'
+	if (isCurrent) {
+		currentRequests++
+		cancelPreparedNextTrack()
+	}
+	const controller = new AbortController()
+	const abort = () => controller.abort()
+	options.signal?.addEventListener('abort', abort, { once: true })
+	if (options.signal?.aborted) abort()
+	let timer: ReturnType<typeof setTimeout> | undefined
+	let timedOut = false
+	try {
+		assertActive(controller.signal)
+		const local = await resolveLocalFile(item.url)
+		assertActive(controller.signal)
+		if (local.status === 'resolved')
+			return {
+				url: local.fileUri,
+				wasCached: false,
+				headers: item.headers,
+				userAgent: item.userAgent,
+			}
+		if (local.status !== 'nonlocal') throw new Error('本地文件不存在，请重新缓存或导入')
+		const identity = cacheIdentity(item)
+		const cached = await findCachedPath(item, identity)
+		assertActive(controller.signal)
+		if (cached)
+			return {
+				url: cached,
+				wasCached: true,
+				cacheIdentity: identity,
+				headers: item.headers,
+				userAgent: item.userAgent,
+			}
+		if (item.url && item.url !== 'Unknown' && !item.url.includes('fake'))
+			return {
+				url: item.url,
+				wasCached: false,
+				headers: item.headers,
+				userAgent: item.userAgent,
+				cacheIdentity: identity,
+			}
+		const result = await Promise.race([
+			resolveUncached(item, requestType, controller.signal),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(
+					() => {
+						timedOut = true
+						reject(new Error('音源请求超时'))
+						controller.abort()
+					},
+					isCurrent ? 30000 : 45000,
+				)
+			}),
+			new Promise<never>((_, reject) => {
+				controller.signal.addEventListener('abort', () => reject(new Error('SOURCE_CANCELLED')), {
+					once: true,
+				})
+			}),
+		])
+		assertActive(controller.signal)
+		if (isCurrent) nowApiState.setValue('正常')
+		return result
+	} catch (error) {
+		if (isCurrent && (!controller.signal.aborted || timedOut)) {
+			nowApiState.setValue('异常')
+			logError('获取音源失败', error)
+			showToast('获取音源失败', error instanceof Error ? error.message : String(error), 'error')
+		}
+		return { url: fakeAudioMp3Uri, wasCached: false }
+	} finally {
+		if (timer) clearTimeout(timer)
+		options.signal?.removeEventListener('abort', abort)
+		if (isCurrent) currentRequests--
+	}
 }

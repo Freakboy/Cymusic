@@ -13,6 +13,9 @@ export type Playlist = {
 	id: string
 	/** 平台 */
 	platform: string
+	remoteBinding?: IMusic.PlayList['remoteBinding']
+	customName?: boolean
+	customCover?: boolean
 	/** 作者 */
 	artist: string
 	songs: IMusic.IMusicItem[]

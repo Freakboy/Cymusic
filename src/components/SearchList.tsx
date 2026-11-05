@@ -7,10 +7,11 @@ import i18n from '@/utils/i18n'
 import { isSameMediaItem } from '@/utils/mediaItem'
 
 import { getSingerMidBySingerName } from '@/helpers/userApi/getMusicSource'
+import { useSourceSearchText } from '@/locales/sourceSearch'
 import { FlashList } from '@shopify/flash-list'
 import { router } from 'expo-router'
 import React, { memo, useCallback, useMemo } from 'react'
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { ActivityIndicator, Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
 import { Image } from 'expo-image'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { Track } from '@/player/types'
@@ -24,6 +25,9 @@ export type SearchListProps = {
 	onLoadMore: () => void
 	hasMore: boolean
 	isLoading: boolean
+	error?: string
+	onRetry?: () => void
+	emptyMessage?: string
 }
 
 const ItemDivider = memo(() => {
@@ -68,51 +72,70 @@ const FooterComponent = memo(({ isLoading, hasMore }: { isLoading: boolean; hasM
 
 const createStyles = (colors: ThemeColors) =>
 	StyleSheet.create({
-	artistItem: {
-		flexDirection: 'row',
-		alignItems: 'center',
-	},
-	artistAvatar: {
-		width: 50,
-		height: 50,
-		borderRadius: 5,
-		marginRight: 13,
-	},
-	artistName: {
-		fontSize: 16,
-		color: colors.text,
-	},
+		artistItem: {
+			flexDirection: 'row',
+			alignItems: 'center',
+		},
+		artistAvatar: {
+			width: 50,
+			height: 50,
+			borderRadius: 5,
+			marginRight: 13,
+		},
+		artistName: {
+			fontSize: 16,
+			color: colors.text,
+		},
 	})
 
-export const SearchList: React.FC<SearchListProps> = ({
+export const SearchList = ({
 	tracks,
 	onLoadMore,
 	hasMore,
 	isLoading,
-}) => {
+	error,
+	onRetry,
+	emptyMessage,
+}: SearchListProps) => {
+	const text = useSourceSearchText()
 	const colors = useThemeColors()
 	const defaultStyles = useDefaultStyles()
 	const styles = useMemo(() => createStyles(colors), [colors])
 	const currentMusic = myTrackPlayer.useCurrentMusic()
 	const playing = useIsPlaying()
 
-	const handleTrackSelect = useCallback(async (selectedTrack: Track) => {
-		if (selectedTrack.isArtist) {
-			if (!selectedTrack.artist.includes('未知')) {
-				getSingerMidBySingerName(selectedTrack.artist).then((singerMid) => {
-					if (singerMid) {
-						router.navigate(`/(modals)/${singerMid}`)
-					}
-				})
+	const handleTrackSelect = useCallback(
+		async (selectedTrack: Track) => {
+			try {
+				if (selectedTrack.searchKind === 'albums' || selectedTrack.searchKind === 'playlists') {
+					router.navigate({
+						pathname: '/(tabs)/search/collection',
+						params: {
+							kind: selectedTrack.searchKind,
+							id: selectedTrack.albumMID || selectedTrack.id,
+							title: selectedTrack.title,
+						},
+					})
+					return
+				}
+				if (selectedTrack.isArtist) {
+					const singerMid =
+						selectedTrack.singerMID || (await getSingerMidBySingerName(selectedTrack.artist || ''))
+					if (!singerMid) throw new Error(text.empty)
+					router.navigate(`/(modals)/${singerMid}`)
+					return
+				}
+				await myTrackPlayer.play(selectedTrack as IMusic.IMusicItem)
+			} catch (cause) {
+				Alert.alert(text.failed, cause instanceof Error ? cause.message : String(cause))
 			}
-			return
-		}
-		await myTrackPlayer.play(selectedTrack as IMusic.IMusicItem)
-	}, [])
+		},
+		[text],
+	)
 
 	const renderItem = useCallback(
 		({ item: track }: { item: Track }) => {
-			if (track.isArtist) {
+			if (track.isArtist || track.searchKind) {
 				return (
 					<TouchableOpacity style={styles.artistItem} onPress={() => handleTrackSelect(track)}>
 						<Image
@@ -139,21 +162,37 @@ export const SearchList: React.FC<SearchListProps> = ({
 				/>
 			)
 		},
-		[handleTrackSelect, currentMusic, playing, styles.artistAvatar, styles.artistItem, styles.artistName],
+		[
+			handleTrackSelect,
+			currentMusic,
+			playing,
+			styles.artistAvatar,
+			styles.artistItem,
+			styles.artistName,
+		],
 	)
 
-	const keyExtractor = useCallback((item: Track, index: number) => `${item.id}-${index}`, [])
+	const keyExtractor = useCallback((item: Track) => `${item.platform || 'tx'}:${item.id}`, [])
 
 	const handleEndReached = useCallback(() => {
-		if (hasMore && !isLoading && tracks.length >= 20) {
+		if (hasMore && !isLoading && !error) {
 			onLoadMore()
 		}
-	}, [hasMore, isLoading, tracks.length, onLoadMore])
+	}, [hasMore, isLoading, error, onLoadMore])
 	const insets = useSafeAreaInsets()
 
 	const footerComponent = useMemo(
-		() => <FooterComponent isLoading={isLoading} hasMore={hasMore} />,
-		[isLoading, hasMore],
+		() =>
+			error ? (
+				<TouchableOpacity accessibilityRole="button" onPress={onRetry} style={{ padding: 20 }}>
+					<Text style={{ color: colors.text, textAlign: 'center' }}>
+						{error} {text.retry}
+					</Text>
+				</TouchableOpacity>
+			) : (
+				<FooterComponent isLoading={isLoading} hasMore={hasMore || tracks.length === 0} />
+			),
+		[error, onRetry, colors.text, text.retry, isLoading, hasMore, tracks.length],
 	)
 	const listExtraData = useMemo(
 		() => ({
@@ -175,7 +214,16 @@ export const SearchList: React.FC<SearchListProps> = ({
 					paddingHorizontal: screenPadding.horizontal,
 				}}
 				ItemSeparatorComponent={ItemDivider}
-				ListEmptyComponent={!isLoading ? <EmptyComponent /> : null}
+				ListEmptyComponent={
+					!isLoading && !error ? (
+						<View>
+							<EmptyComponent />
+							<Text style={{ color: colors.textMuted, textAlign: 'center' }}>
+								{emptyMessage || text.empty}
+							</Text>
+						</View>
+					) : null
+				}
 				renderItem={renderItem}
 				keyExtractor={keyExtractor}
 				onEndReached={handleEndReached}

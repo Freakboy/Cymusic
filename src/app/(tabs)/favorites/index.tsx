@@ -9,6 +9,7 @@ import i18n from '@/utils/i18n'
 import { router } from 'expo-router'
 import { useMemo } from 'react'
 import { Image, ScrollView, View } from 'react-native'
+import { refreshRemotePlaylist } from '@/helpers/remotePlaylistStore'
 
 const FavoritesScreen = () => {
 	const defaultStyles = useDefaultStyles()
@@ -51,13 +52,16 @@ const FavoritesScreen = () => {
 		) as Playlist[]
 	}, [playLists, search])
 	const handlePlaylistPress = (playlist: Playlist) => {
-		if (playlist.name == 'Favorites') {
+		if (playlist.id === 'favorites') {
 			router.push(`/(tabs)/favorites/favoriteMusic`)
-		} else if (playlist.name == 'Local') {
+		} else if (playlist.id === 'local') {
 			router.push(`/(tabs)/favorites/localMusic`)
 		} else {
 			router.push(`/(tabs)/favorites/${playlist.id}`)
 		}
+	}
+	const handleRefreshPlaylist = async (playlist: Playlist) => {
+		await refreshRemotePlaylist(playlist.id)
 	}
 	return (
 		<View style={defaultStyles.container}>
@@ -71,6 +75,7 @@ const FavoritesScreen = () => {
 					scrollEnabled={false}
 					playlists={filteredPlayLists as Playlist[]}
 					onPlaylistPress={handlePlaylistPress}
+					onRefreshPlaylist={handleRefreshPlaylist}
 				/>
 			</ScrollView>
 		</View>

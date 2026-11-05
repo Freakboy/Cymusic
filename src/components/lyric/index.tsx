@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import type { FlatList as NativeFlatList, FlatListProps } from 'react-native'
 
 import { ThemeColors } from '@/constants/tokens'
@@ -8,6 +8,7 @@ import myTrackPlayer from '@/helpers/trackPlayerIndex'
 import { useThemeColors } from '@/hooks/useAppTheme'
 import useDelayFalsy from '@/hooks/useDelayFalsy'
 import PersistStatus from '@/store/PersistStatus'
+import i18n from '@/locales/commentsFeature'
 import delay from '@/utils/delay'
 import { musicIsPaused } from '@/utils/trackUtils'
 import { useIsPlaying } from '@rntp/player'
@@ -49,11 +50,13 @@ export default function Lyric(_props: IProps) {
 	// const lyrics = parser.getLyric()
 	// console.log('lyrics', lyrics)
 	const [loading] = useState(false)
-	const { meta, lyrics } = LyricManager.useLyricState()
+	const { meta, lyrics, translationLyrics } = LyricManager.useLyricState()
 	// console.log('lyrics', lyrics)
 	const currentLrcItem = LyricManager.useCurrentLyric()
-	// const showTranslation = PersistStatus.useValue('lyric.showTranslation', false)
+	const showTranslation = PersistStatus.useValue('lyric.showTranslation', false) === true
+	const displayMode = PersistStatus.useValue('lyric.displayMode') ?? (showTranslation ? 'bilingual' : 'original')
 	const fontSizeKey = PersistStatus.useValue('lyric.detailFontSize', 1)
+	const { width, fontScale } = useWindowDimensions()
 	const fontSizeStyle = useMemo(
 		() => ({
 			fontSize: fontSizeMap[fontSizeKey!],
@@ -70,7 +73,10 @@ export default function Lyric(_props: IProps) {
 	const dragShownRef = useRef(false)
 
 	// 用来缓存高度
-	const itemHeightsRef = useRef<IItemHeights>({})
+	const { key: layoutKey, heights: itemHeights } = useMemo(() => ({
+		key: JSON.stringify([lyrics, translationLyrics, displayMode, fontSizeKey, width, fontScale]),
+		heights: {} as IItemHeights,
+	}), [lyrics, translationLyrics, displayMode, fontSizeKey, width, fontScale])
 	const lastAutoScrollAtRef = useRef(0)
 	const lastAutoScrollIndexRef = useRef(-1)
 
@@ -80,15 +86,15 @@ export default function Lyric(_props: IProps) {
 			<View
 				style={styles.empty}
 				onLayout={(evt) => {
-					itemHeightsRef.current.blankHeight = evt.nativeEvent.layout.height
+					itemHeights.blankHeight = evt.nativeEvent.layout.height
 				}}
 			/>
 		)
-	}, [])
+	}, [styles.empty, itemHeights])
 
 	const handleLyricItemLayout = useCallback((index: number, height: number) => {
-		itemHeightsRef.current[index] = height
-	}, [])
+		itemHeights[index] = height
+	}, [itemHeights])
 
 	const clampLyricIndex = useCallback((index: number, listLength: number) => {
 		if (listLength <= 0) {
@@ -162,14 +168,13 @@ export default function Lyric(_props: IProps) {
 		}
 		const targetIndex = currentLrcItem?.index === -1 || !currentLrcItem ? 0 : currentLrcItem.index ?? 0
 		scrollToLyricIndex(targetIndex, lyrics.length)
-	}, [currentLrcItem?.index, lyrics.length, draggingIndex, playing, scrollToLyricIndex])
+	}, [currentLrcItem, lyrics, draggingIndex, playing, scrollToLyricIndex])
 
 	useEffect(() => {
 		scrollToCurrentLrcItem()
-	}, [scrollToCurrentLrcItem])
+	}, [scrollToCurrentLrcItem, layoutKey])
 
 	const getItemLayout = useCallback((_: unknown, index: number) => {
-		const itemHeights = itemHeightsRef.current
 		const headerHeight = itemHeights.blankHeight ?? 0
 		let offset = headerHeight
 		for (let i = 0; i < index; i++) {
@@ -181,7 +186,7 @@ export default function Lyric(_props: IProps) {
 			offset,
 			index,
 		}
-	}, [])
+	}, [itemHeights])
 
 	const onScrollBeginDrag = useCallback(() => {
 		dragShownRef.current = true
@@ -198,21 +203,20 @@ export default function Lyric(_props: IProps) {
 		if (dragShownRef.current) {
 			const offset = e.nativeEvent.contentOffset.y + e.nativeEvent.layoutMeasurement.height / 2
 
-			const itemHeights = itemHeightsRef.current
-			let height = itemHeights.blankHeight!
+			let height = itemHeights.blankHeight ?? 0
 			if (offset <= height) {
 				setDraggingIndex(0)
 				return
 			}
 			for (let i = 0; i < lyrics.length; ++i) {
-				height += itemHeights[i] ?? 0
+				height += itemHeights[i] ?? ITEM_HEIGHT
 				if (height > offset) {
 					setDraggingIndex(i)
 					return
 				}
 			}
 		}
-	}, [lyrics.length, setDraggingIndex])
+	}, [lyrics.length, setDraggingIndex, itemHeights])
 
 	const handleLyricItemPress = useCallback(
 		async (index: number) => {
@@ -232,13 +236,36 @@ export default function Lyric(_props: IProps) {
 			{blankComponent}
 			<View style={styles.lyricMeta}></View>
 		</>
-	), [blankComponent])
+	), [blankComponent, styles.lyricMeta])
+
+	const translationsByLine = useMemo(() => {
+		let translationIndex = 0
+		return lyrics.map((item, index) => {
+			if (!translationLyrics?.length) return undefined
+			while (translationIndex + 1 < translationLyrics.length &&
+				Math.abs(translationLyrics[translationIndex + 1].time - item.time) <=
+				Math.abs(translationLyrics[translationIndex].time - item.time)) {
+				++translationIndex
+			}
+			const entry = translationLyrics[translationIndex]
+			const distance = Math.abs(entry.time - item.time)
+			// Allow timestamp rounding, but do not borrow a neighbouring line's translation.
+			if (distance > 0.25 ||
+				(index > 0 && Math.abs(lyrics[index - 1].time - entry.time) < distance) ||
+				(index + 1 < lyrics.length && Math.abs(lyrics[index + 1].time - entry.time) < distance)) {
+				return undefined
+			}
+			return entry.lrc
+		})
+	}, [lyrics, translationLyrics])
 
 	const renderLyricItem = useCallback(({ item, index }: { item: ILyric.IParsedLrcItem; index: number }) => {
+		const translation = translationsByLine[index]
 		return (
 			<LyricItemComponent
 				index={index}
-				text={item.lrc}
+				text={displayMode === 'translation' && translation ? translation : item.lrc}
+				translation={displayMode === 'bilingual' ? translation : undefined}
 				fontSize={fontSizeStyle.fontSize}
 				onLayout={handleLyricItemLayout}
 				light={draggingIndex === index}
@@ -246,7 +273,7 @@ export default function Lyric(_props: IProps) {
 				onPress={() => handleLyricItemPress(index)}
 			/>
 		)
-	}, [fontSizeStyle.fontSize, handleLyricItemLayout, draggingIndex, currentLrcItem?.index, handleLyricItemPress])
+	}, [fontSizeStyle.fontSize, handleLyricItemLayout, draggingIndex, currentLrcItem?.index, handleLyricItemPress, displayMode, translationsByLine])
 
 	return (
 		<>
@@ -257,6 +284,7 @@ export default function Lyric(_props: IProps) {
 					</View>
 				) : lyrics?.length ? (
 					<LyricFlatList
+						key={layoutKey}
 						ref={(_) => {
 							listRef.current = _
 						}}
@@ -285,7 +313,7 @@ export default function Lyric(_props: IProps) {
 					/>
 				) : (
 					<View style={styles.fullCenter}>
-						<Text style={[styles.white, fontSizeStyle]}>暂无歌词</Text>
+						<Text style={[styles.white, fontSizeStyle]}>{i18n.t('commentsFeature.noLyrics')}</Text>
 					</View>
 				)}
 			</View>

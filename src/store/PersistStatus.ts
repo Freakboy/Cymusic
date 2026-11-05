@@ -21,6 +21,7 @@ interface IPersistConfig {
 	'app.skipVersion': string
 	'app.pluginUpdateTime': number
 	'lyric.showTranslation': boolean
+	'lyric.displayMode': 'original' | 'bilingual' | 'translation'
 	'lyric.detailFontSize': number
 	'lyric.delaySeconds': number
 	'app.logo': 'Default' | 'Logo1'
@@ -33,6 +34,8 @@ interface IPersistConfig {
 	//已导入的本地音乐
 	'music.importedLocalMusic': IMusic.IMusicItem[]
 	'music.autoCacheLocal': boolean
+	'music.preloadNextTrack': boolean
+	'music.bluetoothLyrics': boolean
 	'app.language': string
 	'app.themeMode': 'system' | 'light' | 'dark'
 	'music.isCachedIconVisible': boolean

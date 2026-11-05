@@ -1,5 +1,5 @@
 import { httpFetch } from '../../request'
-import { dateFormat2 } from '../../index'
+import { dateFormat } from '../../common'
 import getMusicInfo from './musicInfo'
 
 const emojis = {
@@ -75,24 +75,26 @@ const songIdMap = new Map()
 const promises = new Map()
 
 export default {
-  _requestObj: null,
-  _requestObj2: null,
   async getSongId({ songId, songmid }) {
-    if (songId) return songId
+    if (songId && /^\d+$/.test(String(songId))) return songId
+    if (songmid && /^\d+$/.test(String(songmid))) return String(songmid)
+    if (!songmid) throw new Error('Missing song ID')
     if (songIdMap.has(songmid)) return songIdMap.get(songmid)
-    if (promises.has(songmid)) return (await promises.get(songmid)).songId
-    const promise = getMusicInfo(songmid)
-    promises.set(promise)
-    const info = await promise
-    songIdMap.set(songmid, info.songId)
-    promises.delete(songmid)
-    return info.songId
+    if (!promises.has(songmid)) promises.set(songmid, getMusicInfo(songmid))
+    const promise = promises.get(songmid)
+    try {
+      const info = await promise
+      if (!info?.songId || !/^\d+$/.test(String(info.songId))) throw new Error('Invalid song ID')
+      songIdMap.set(songmid, info.songId)
+      return info.songId
+    } finally {
+      if (promises.get(songmid) === promise) promises.delete(songmid)
+    }
   },
   async getComment(mInfo, page = 1, limit = 20) {
-    if (this._requestObj) this._requestObj.cancelHttp()
     const songId = await this.getSongId(mInfo)
 
-    const _requestObj = httpFetch('http://c.y.qq.com/base/fcgi-bin/fcg_global_comment_h5.fcg', {
+    const _requestObj = httpFetch('https://c.y.qq.com/base/fcgi-bin/fcg_global_comment_h5.fcg', {
       method: 'POST',
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; WOW64; Trident/5.0)',
@@ -111,12 +113,12 @@ export default {
       },
     })
     const { body, statusCode } = await _requestObj.promise
-    if (statusCode != 200 || body.code !== 0) throw new Error('获取评论失败')
+    if (statusCode != 200 || body?.code !== 0 || !body.comment) throw new Error('获取评论失败')
     // console.log(body, statusCode)
     const comment = body.comment
     return {
       source: 'tx',
-      comments: this.filterNewComment(comment.commentlist),
+      comments: this.filterNewComment(comment.commentlist || []),
       total: comment.commenttotal,
       page,
       limit,
@@ -142,7 +144,6 @@ export default {
     //     pagesize: limit,
     //   },
     // })
-    if (this._requestObj2) this._requestObj2.cancelHttp()
     const songId = await this.getSongId(mInfo)
 
     const _requestObj2 = httpFetch('https://u.y.qq.com/cgi-bin/musicu.fcg', {
@@ -182,22 +183,22 @@ export default {
     })
     const { body, statusCode } = await _requestObj2.promise
     // console.log('body', body)
-    if (statusCode != 200 || body.code !== 0 || body.req.code !== 0) throw new Error('获取热门评论失败')
+    if (statusCode != 200 || body?.code !== 0 || body.req?.code !== 0 || !body.req.data?.CommentList) throw new Error('获取热门评论失败')
     const comment = body.req.data.CommentList
     return {
       source: 'tx',
-      comments: this.filterHotComment(comment.Comments),
+      comments: this.filterHotComment(comment.Comments || []),
       total: comment.Total,
       page,
       limit,
       maxPage: Math.ceil(comment.Total / limit) || 1,
     }
   },
-  filterNewComment(rawList) {
+  filterNewComment(rawList = []) {
     return rawList.map(item => {
       let time = this.formatTime(item.time)
-      let timeStr = time ? dateFormat2(time) : null
-      if (item.middlecommentcontent) {
+      let timeStr = time ? dateFormat(time) : null
+      if (item.middlecommentcontent?.length) {
         let firstItem = item.middlecommentcontent[0]
         firstItem.avatarurl = item.avatarurl
         firstItem.praisenum = item.praisenum
@@ -233,14 +234,14 @@ export default {
       }
     })
   },
-  filterHotComment(rawList) {
+  filterHotComment(rawList = []) {
     return rawList.map(item => {
       return {
         id: `${item.SeqNo}_${item.CmId}`,
         rootId: item.SeqNo,
         text: item.Content ? this.replaceEmoji(item.Content).replace(/\\n/g, '\n') : '',
         time: item.PubTime ? this.formatTime(item.PubTime) : null,
-        timeStr: item.PubTime ? dateFormat2(this.formatTime(item.PubTime)) : null,
+        timeStr: item.PubTime ? dateFormat(this.formatTime(item.PubTime)) : null,
         userName: item.Nick ?? '',
         images: item.Pic ? [item.Pic] : [],
         avatar: item.Avatar,
@@ -253,7 +254,7 @@ export default {
               id: `sub_${c.SeqNo}_${c.CmId}`,
               text: this.replaceEmoji(c.Content).replace(/\\n/g, '\n'),
               time: c.PubTime ? this.formatTime(c.PubTime) : null,
-              timeStr: c.PubTime ? dateFormat2(this.formatTime(c.PubTime)) : null,
+              timeStr: c.PubTime ? dateFormat(this.formatTime(c.PubTime)) : null,
               userName: c.Nick ?? '',
               avatar: c.Avatar,
               images: c.Pic ? [c.Pic] : [],

@@ -142,6 +142,8 @@ declare namespace IMusic {
     }
 
     export interface IMusicItem {
+        /** Explicitly retained local addition to a remote playlist. */
+        localAdded?: boolean;
         /** 歌曲在平台的唯一编号 */
         id: string;
         /** 平台 */
@@ -187,7 +189,9 @@ declare namespace IMusic {
         /** 内部信息 */
         [k: symbol]: any;
     }
- export interface PlayList {
+  export interface PlayList {
+        customName?: boolean;
+        customCover?: boolean;
         /** 歌单在平台的唯一编号 */
         id: string;
         /** 平台 */
@@ -203,7 +207,15 @@ declare namespace IMusic {
         /** 音源 */
         source?: Partial<Record<IQualityKey, IMediaSource>>;
 
-        songs: IMusicItem[];
+         songs: IMusicItem[];
+         /** 远端歌单来源绑定，用于重新导入更新 */
+         remoteBinding?: {
+             platform: 'QQ' | 'Netease';
+             remoteId: string;
+             sourceUrl: string;
+              lastImportedAt: number;
+              remoteSongKeys?: string[];
+         };
         /** 其他可以被序列化的信息 */
         [k: string]: any;
         /** 内部信息 */
