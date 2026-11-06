@@ -2,18 +2,19 @@ import { fontSize } from '@/constants/tokens'
 import { generateTracksListId } from '@/helpers/miscellaneous'
 import { Playlist } from '@/helpers/types'
 import { useDefaultStyles } from '@/styles'
-import { useMemo } from 'react'
+import { ReactNode, useMemo } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { Image } from 'expo-image'
 import type { Track } from '@/player/types'
 import { QueueControls } from './QueueControls'
-import { TracksList } from './TracksList'
+import { TracksList, TracksListProps } from './TracksList'
 
 type PlaylistTracksListProps = {
 	playlist: Playlist
 	tracks: Track[]
 	allowDelete?: boolean
-	onDeleteTrack?: (trackId: string) => void
+	onDeleteTrack?: TracksListProps['onDeleteTrack']
+	headerAccessory?: ReactNode
 	showImportMenu?: boolean
 	onImportTrack?: () => void
 	isMultiSelectMode?: boolean
@@ -23,11 +24,15 @@ type PlaylistTracksListProps = {
 	onSelectAll?: () => void
 	deleteSelectedTracks?: () => void
 	exportSelectedTracks?: () => void
-}
+} & Pick<TracksListProps, 'scrollEnabled' | 'style' | 'contentInsetAdjustmentBehavior'>
 
 export const PlaylistTracksList = ({
 	playlist,
 	tracks,
+	scrollEnabled = false,
+	style,
+	contentInsetAdjustmentBehavior,
+	headerAccessory,
 	allowDelete = false,
 	onDeleteTrack,
 	showImportMenu = false,
@@ -49,11 +54,14 @@ export const PlaylistTracksList = ({
 	return (
 		<TracksList
 			id={generateTracksListId(playlist.title)}
-			scrollEnabled={false}
+			scrollEnabled={scrollEnabled}
+			style={style}
+			contentInsetAdjustmentBehavior={contentInsetAdjustmentBehavior}
 			hideQueueControls={true}
 			ListHeaderComponentStyle={styles.playlistHeaderContainer}
 			ListHeaderComponent={
 				<View>
+					{headerAccessory}
 					<View style={styles.artworkImageContainer}>
 						<Image
 							contentFit="cover"

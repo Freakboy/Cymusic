@@ -1,5 +1,6 @@
 // Runs the production helper with real, unauthenticated requests. Never logs headers or song data.
 import { loadModule } from './native-services-fixture.mjs'
+import CryptoJS from 'crypto-js'
 
 const remote = loadModule('src/helpers/userApi/remotePlaylist.ts', { 'expo/fetch': {
 	async fetch(url, options) {
@@ -30,7 +31,7 @@ const remote = loadModule('src/helpers/userApi/remotePlaylist.ts', { 'expo/fetch
 			throw error
 		}
 	},
-} }, { URL })
+}, 'crypto-js': CryptoJS }, { URL })
 const inputs = process.argv.slice(2)
 for (const input of inputs.length ? inputs : [
 	'https://y.qq.com/n/ryqq/playlist/9791950324',

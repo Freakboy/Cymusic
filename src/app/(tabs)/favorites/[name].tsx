@@ -6,7 +6,7 @@ import { Playlist } from '@/helpers/types'
 import { useDefaultStyles } from '@/styles'
 import { Redirect, router, useLocalSearchParams } from 'expo-router'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ActivityIndicator, Alert, ScrollView, Text, TouchableOpacity, View } from 'react-native'
+import { ActivityIndicator, Alert, Text, TouchableOpacity, View } from 'react-native'
 import type { Track } from '@/player/types'
 import { refreshRemotePlaylist } from '@/helpers/remotePlaylistStore'
 import { getPlaylistReference, remotePlaylistId } from '@/helpers/userApi/remotePlaylist'
@@ -37,8 +37,8 @@ const PlaylistScreen = () => {
 	}, [playlist])
 
 	const handleDeleteTrack = useCallback(
-		(trackId: string) => {
-			myTrackPlayer.deleteSongFromStoredPlayList(playlist as Playlist, trackId)
+		(_trackId: string, track: Track) => {
+			myTrackPlayer.deleteSongFromStoredPlayList(playlist as Playlist, track as IMusic.IMusicItem)
 		},
 		[playlist],
 	)
@@ -71,23 +71,33 @@ const PlaylistScreen = () => {
 
 	return (
 		<View style={defaultStyles.container}>
-			<ScrollView
+			<PlaylistTracksList
+				playlist={playlist as Playlist}
+				tracks={songs as Track[]}
+				allowDelete={true}
+				onDeleteTrack={handleDeleteTrack}
+				scrollEnabled={true}
 				contentInsetAdjustmentBehavior="automatic"
-				style={{ paddingHorizontal: screenPadding.horizontal }}
-			>
-				{getPlaylistReference(playlist) && <TouchableOpacity disabled={refreshing} onPress={handleRefresh}
-					accessibilityRole="button" style={{ padding: 16, alignItems: 'center', flexDirection: 'row', gap: 8 }}>
-					{refreshing && <ActivityIndicator color={colors.primary} />}
-					<Text style={{ color: colors.primary }}>{refreshing ? '正在刷新...' : '刷新远端歌单'}</Text>
-				</TouchableOpacity>}
-				{Boolean(refreshError) && <Text style={{ color: colors.error }}>{refreshError}</Text>}
-				<PlaylistTracksList
-					playlist={playlist as Playlist}
-					tracks={songs as Track[]}
-					allowDelete={true}
-					onDeleteTrack={handleDeleteTrack}
-				/>
-			</ScrollView>
+				style={{ flex: 1, paddingHorizontal: screenPadding.horizontal }}
+				headerAccessory={
+					<>
+						{getPlaylistReference(playlist) && (
+							<TouchableOpacity
+								disabled={refreshing}
+								onPress={handleRefresh}
+								accessibilityRole="button"
+								style={{ padding: 16, alignItems: 'center', flexDirection: 'row', gap: 8 }}
+							>
+								{refreshing && <ActivityIndicator color={colors.primary} />}
+								<Text style={{ color: colors.primary }}>
+									{refreshing ? '正在刷新...' : '刷新远端歌单'}
+								</Text>
+							</TouchableOpacity>
+						)}
+						{Boolean(refreshError) && <Text style={{ color: colors.error }}>{refreshError}</Text>}
+					</>
+				}
+			/>
 		</View>
 	)
 }

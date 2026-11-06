@@ -1,4 +1,5 @@
 import { fetch } from 'expo/fetch'
+import CryptoJS from 'crypto-js'
 
 export type RemotePlaylistPlatform = 'QQ' | 'Netease'
 
@@ -103,7 +104,11 @@ async function requestJson(url: string, headers?: Record<string, string>) {
 	try {
 		const response = await fetch(url, { signal: controller.signal, headers, credentials: 'omit', redirect: 'error' })
 		if (!response.ok) throw new Error(`歌单请求失败 (HTTP ${response.status})`)
-		const data = await response.json()
+		// Image IDs exceed JS integer precision. Match whole JSON strings so escaped
+		// field names inside descriptions are never rewritten as object keys.
+		const text = await response.text()
+		const data = JSON.parse(text.replace(/("(?:\\.|[^"\\])*")(\s*:\s*)(\d+)(?=\s*[,}])|"(?:\\.|[^"\\])*"/g,
+			(token, key, separator, id) => /^"(?:coverImgId|picId|pic)"$/.test(key) ? `${key}${separator}"${id}"` : token))
 		if (data.code != null && data.code !== 0 && data.code !== 200) {
 			throw new Error(`歌单接口错误 (${data.code})`)
 		}
@@ -121,13 +126,40 @@ function count(value: unknown): number {
 	return Number(value)
 }
 
+function remoteArtwork(...values: unknown[]): string {
+	for (const value of values) {
+		if (typeof value !== 'string' || !value.trim()) continue
+		try {
+			const url = new URL(value.trim().replace(/^\/\//, 'https://'))
+			if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) continue
+			url.protocol = 'https:'
+			return url.href
+		} catch { /* Try the next cover source. */ }
+	}
+	return ''
+}
+
+function neteaseImage(...ids: unknown[]): string {
+	const id = ids.find(value => (typeof value === 'string' && /^[0-9]+$/.test(value) && /[1-9]/.test(value))
+		|| (typeof value === 'number' && Number.isSafeInteger(value) && value > 0))
+	if (id == null) return ''
+	// https://github.com/nondanee/UnblockNeteaseMusic/blob/master/src/browser/crypto.js
+	const key = '3go8&$8*3*3h0k(2)2'
+	const input = String(id)
+	const bytes = Array.from(input, (digit, index) => String.fromCharCode(digit.charCodeAt(0) ^ key.charCodeAt(index % key.length))).join('')
+	const encrypted = CryptoJS.MD5(bytes).toString(CryptoJS.enc.Base64).replace(/\//g, '_').replace(/\+/g, '-')
+	return `https://p1.music.126.net/${encrypted}/${input}.jpg`
+}
+
 export function normalizeNeteaseSong(song: any): IMusic.IMusicItem {
 	const artists = song.ar ?? song.artists
 	const album = song.al ?? song.album
 	return {
 		id: String(song.id), platform: 'Netease', title: song.name || '未知歌曲',
 		artist: Array.isArray(artists) ? artists.map((item: any) => item.name).filter(Boolean).join('、') : '未知歌手',
-		album: album?.name || '未知专辑', artwork: album?.picUrl || '',
+		album: album?.name || '未知专辑', artwork: remoteArtwork(album?.picUrl, song.album?.picUrl)
+			|| neteaseImage(album?.pic_str, album?.picId_str, album?.picId, album?.pic,
+				song.album?.pic_str, song.album?.picId_str, song.album?.picId, song.album?.pic),
 		duration: Math.round((song.dt ?? song.duration ?? 0) / 1000), url: 'Unknown',
 	}
 }
@@ -161,10 +193,12 @@ async function fetchNeteasePlaylist(reference: RemotePlaylistReference) {
 		|| new Set(ordered.map((song: any) => String(song.id))).size !== total) {
 		throw new Error('网易云歌曲列表不完整，未更新本地数据')
 	}
+	const songs = ordered.map(normalizeNeteaseSong)
 	return {
 		artist: playlist.creator?.nickname || '网易云音乐', name: playlist.name || '未命名歌单',
-		artwork: playlist.coverImgUrl || '', description: playlist.description || '',
-		songs: ordered.map(normalizeNeteaseSong),
+		artwork: remoteArtwork(playlist.coverImgUrl, playlist.coverImg?.url, playlist.picUrl)
+			|| neteaseImage(playlist.coverImgId_str, playlist.coverImgId) || remoteArtwork(songs[0]?.artwork),
+		description: playlist.description || '', songs,
 	}
 }
 
@@ -265,7 +299,7 @@ async function fetchQQPlaylist(reference: RemotePlaylistReference) {
 export async function fetchRemotePlaylist(reference: RemotePlaylistReference): Promise<RemotePlaylistResult> {
 	const result = reference.platform === 'Netease' ? await fetchNeteasePlaylist(reference) : await fetchQQPlaylist(reference)
 	return {
-		...result, success: true, id: remotePlaylistId(reference), platform: reference.platform, title: result.name,
+		...result, coverImg: result.artwork, success: true, id: remotePlaylistId(reference), platform: reference.platform, title: result.name,
 		remoteBinding: { ...reference, lastImportedAt: Date.now(), remoteSongKeys: result.songs.map(songKey) },
 	}
 }
@@ -295,6 +329,8 @@ export function songKey(song: IMusic.IMusicItem) {
 }
 
 export function mergeRemotePlaylist(existing: IMusic.PlayList, latest: RemotePlaylistResult, merge = false): IMusic.PlayList {
+	const artwork = remoteArtwork(latest.artwork, latest.coverImg, latest.songs[0]?.artwork)
+		|| existing.coverImg || existing.artwork || ''
 	const remoteKeys = new Set(latest.songs.map(songKey))
 	const previousKeys = existing.remoteBinding?.remoteSongKeys
 	// Without a QQ snapshot, missing old songs may be manual additions. Retain them once;
@@ -307,9 +343,8 @@ export function mergeRemotePlaylist(existing: IMusic.PlayList, latest: RemotePla
 		...existing, ...latest, id: latest.id,
 		name: existing.customName ? existing.name : latest.name,
 		title: existing.customName ? existing.title : latest.title,
-		artwork: existing.customCover ? existing.artwork : latest.artwork,
-		coverImg: existing.customCover ? existing.coverImg : undefined,
-		customName: existing.customName, customCover: existing.customCover,
+		artwork, coverImg: artwork,
+		customName: existing.customName, customCover: undefined,
 		songs: [...latest.songs.map((song) => localKeys.has(songKey(song)) ? { ...song, localAdded: true } : song),
 			...retained.filter((song) => !remoteKeys.has(songKey(song))).map((song) => ({ ...song, localAdded: true }))],
 	}

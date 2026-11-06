@@ -1,12 +1,13 @@
 import { assert, checks, deferred, flush, loadModule } from './native-services-fixture.mjs'
 import { fakeClock } from './request-fixture.mjs'
+import CryptoJS from 'crypto-js'
 
 const { check, finish } = checks()
 const plain = (value) => JSON.parse(JSON.stringify(value))
 const ref = (platform = 'QQ', remoteId = '42') => ({ platform, remoteId, sourceUrl: remoteId })
 const song = (id, platform = 'QQ', extra = {}) => ({ id, platform, title: id, artist: 'artist', album: '', artwork: '', duration: 1, ...extra })
 const qqPage = (ids, total = ids.length) => ({ code: 0, cdlist: [{ dissname: 'remote', songnum: total, songlist: ids.map((mid) => ({ mid, title: mid })) }] })
-const netSong = (id) => ({ id, name: `song ${id}`, ar: [{ name: 'new artist' }], al: { name: 'new album', picUrl: 'new.jpg' }, dt: 123000 })
+const netSong = (id) => ({ id, name: `song ${id}`, ar: [{ name: 'new artist' }], al: { name: 'new album', picUrl: 'https://example.com/new.jpg' }, dt: 123000 })
 
 function fixture(responses = [], initial = []) {
 	const clock = fakeClock()
@@ -18,11 +19,14 @@ function fixture(responses = [], initial = []) {
 			calls.push({ url, options })
 			const response = responses.shift()
 			if (response instanceof Error) throw response
-			if (typeof response === 'function') return response(url, options)
+			if (typeof response === 'function') {
+				const result = await response(url, options)
+				return { ...result, text: result.text ?? (async () => JSON.stringify(await result.json())) }
+			}
 			assert.ok(response, `Unexpected request: ${url}`)
-			return { ok: true, json: async () => response }
+			return { ok: true, text: async () => JSON.stringify(response), json: async () => response }
 		},
-	} }, { ...clock, URL })
+	}, 'crypto-js': CryptoJS }, { ...clock, URL })
 	const store = loadModule('src/helpers/remotePlaylistStore.ts', {
 		'@/player/PlayerStore': { playListsStore: { getValue: () => playlists, setValue: (value) => { playlists = value } } },
 		'@/store/PersistStatus': { set: (key, value) => { assert.equal(key, 'music.playLists'); writes.push(value) } },
@@ -349,14 +353,14 @@ await check('request timeout aborts and releases the timer', async () => {
 await check('Netease fills missing IDs anywhere, reorders by full trackIds, and normalizes old/new fields', async () => {
 	const f = fixture([
 		{ code: 200, result: { name: 'old playlist', trackCount: 3, trackIds: [{ id: 1 }, { id: 2 }, { id: 3 }], tracks: [netSong(3), netSong(1)] } },
-		{ code: 200, songs: [{ id: 2, name: 'old song', artists: [{ name: 'old artist' }], album: { name: 'old album', picUrl: 'old.jpg' }, duration: 45000 }] },
+		{ code: 200, songs: [{ id: 2, name: 'old song', artists: [{ name: 'old artist' }], album: { name: 'old album', picUrl: 'https://example.com/old.jpg' }, duration: 45000 }] },
 	])
 	const result = await f.fetchRemotePlaylist(ref('Netease'))
 	assert.deepEqual(plain(result.songs.map((item) => item.id)), ['1', '2', '3'])
 	assert.match(decodeURIComponent(f.calls[1].url), /ids=\[2\]/)
 	assert.equal(result.songs[1].artist, 'old artist')
 	assert.equal(result.songs[1].album, 'old album')
-	assert.equal(result.songs[1].artwork, 'old.jpg')
+	assert.equal(result.songs[1].artwork, 'https://example.com/old.jpg')
 	assert.equal(result.songs[1].duration, 45)
 	assert.equal(result.songs[0].duration, 123)
 })
@@ -371,6 +375,121 @@ await check('Netease batches a full ID list without depending on initial track o
 	assert.equal(result.songs.length, 402)
 	assert.deepEqual(plain(result.songs.map((item) => Number(item.id))), ids)
 	assert.equal(f.calls.length, 4)
+})
+
+await check('Netease import uses the latest HTTPS playlist cover in both artwork fields', async () => {
+	const cover = 'https://p1.music.126.net/0SUEG8yDACfx0Bw2MYFv4Q==/109951170048519512.jpg'
+	const f = fixture([{ code: 200, playlist: { trackCount: 1, tracks: [netSong(1)],
+		coverImgUrl: cover.replace('https:', 'http:'), coverImgId_str: '109951165456044457',
+		coverImg: { url: 'https://example.com/older.jpg' } } }])
+	const result = f.importRemotePlaylist(await f.fetchRemotePlaylist(ref('Netease')))
+	assert.equal(result.artwork, cover)
+	assert.equal(result.coverImg, cover)
+	assert.equal(f.writes[0][0].coverImg, cover)
+})
+
+await check('refresh replaces custom and stale coverImg with the newest remote cover and clears customCover', async () => {
+	const original = { id: 'remote:Netease:42', platform: 'Netease', songs: [], remoteBinding: ref('Netease'),
+		artwork: 'file:///custom.jpg', coverImg: 'file:///custom.jpg', customCover: true }
+	const cover = 'https://example.com/latest.jpg'
+	const f = fixture([{ code: 200, playlist: { trackCount: 0, tracks: [], coverImgUrl: cover } }], [original])
+	const result = await f.refreshRemotePlaylist(original.id)
+	assert.equal(result.artwork, cover)
+	assert.equal(result.coverImg, cover)
+	assert.ok(!result.customCover)
+	assert.equal(f.playlists[0], result)
+	assert.equal(f.writes[0][0], result)
+})
+
+await check('Netease cover IDs retain exact digits from string aliases and raw JSON numbers', async () => {
+	const cover = 'https://p1.music.126.net/0SUEG8yDACfx0Bw2MYFv4Q==/109951170048519512.jpg'
+	for (const fields of [
+		'"coverImgId":109951170048519512',
+		'"coverImgId":109951170048519520,"coverImgId_str":"109951170048519512"',
+		'"coverImgId":"109951170048519512"',
+	]) {
+		const f = fixture([() => ({ ok: true,
+			text: async () => `{"code":200,"playlist":{"trackCount":0,"tracks":[],${fields},"description":${JSON.stringify('escaped "coverImgId":109951170048519513')}}}`,
+			json: async () => JSON.parse(`{"code":200,"playlist":{"trackCount":0,"tracks":[],${fields}}}`),
+		})])
+		const result = await f.fetchRemotePlaylist(ref('Netease'))
+		assert.equal(result.artwork, cover)
+		assert.equal(result.coverImg, cover)
+		assert.equal(result.description, 'escaped "coverImgId":109951170048519513')
+	}
+})
+
+await check('Netease cover fallback uses valid URL aliases then ID then first ordered song album', async () => {
+	for (const [fields, expected] of [
+		[{ coverImgUrl: 'javascript:invalid', coverImg: { url: '//example.com/cover.jpg' } }, 'https://example.com/cover.jpg'],
+		[{ coverImgUrl: {}, picUrl: 'http://example.com/pic.jpg' }, 'https://example.com/pic.jpg'],
+		[{ coverImgId_str: '109951170048519512' }, 'https://p1.music.126.net/0SUEG8yDACfx0Bw2MYFv4Q==/109951170048519512.jpg'],
+		[{}, 'https://example.com/first.jpg'],
+	]) {
+		const f = fixture([{ code: 200, playlist: { ...fields, trackCount: 2, trackIds: [{ id: 1 }, { id: 2 }], tracks: [netSong(2)] } },
+			{ code: 200, songs: [{ ...netSong(1), al: { picUrl: 'http://example.com/first.jpg' } }] }])
+		const result = await f.fetchRemotePlaylist(ref('Netease'))
+		assert.equal(result.artwork, expected)
+		assert.equal(result.coverImg, expected)
+	}
+	const f = fixture()
+	assert.equal(f.normalizeNeteaseSong({ ...netSong(1), al: {}, album: { picUrl: 'http://example.com/legacy.jpg' } }).artwork, 'https://example.com/legacy.jpg')
+	assert.equal(f.normalizeNeteaseSong({ ...netSong(1), al: { pic_str: '109951170048519512' } }).artwork,
+		'https://p1.music.126.net/0SUEG8yDACfx0Bw2MYFv4Q==/109951170048519512.jpg')
+})
+
+await check('raw album picId survives JSON parsing and provides the missing playlist cover', async () => {
+	const raw = '{"code":200,"playlist":{"trackCount":1,"tracks":[{"id":1,"name":"song","album":{"picId":109951170048519512}}]}}'
+	const f = fixture([() => ({ ok: true, text: async () => raw })])
+	const result = await f.fetchRemotePlaylist(ref('Netease'))
+	assert.equal(result.artwork, 'https://p1.music.126.net/0SUEG8yDACfx0Bw2MYFv4Q==/109951170048519512.jpg')
+	assert.equal(result.songs[0].artwork, result.artwork)
+	assert.equal(result.coverImg, result.artwork)
+})
+
+await check('reimport replaces stale coverImg, explicit override applies once, next refresh takes remote cover', async () => {
+	const page = cover => ({ code: 200, playlist: { trackCount: 0, tracks: [], coverImgUrl: cover } })
+	const f = fixture([page('https://example.com/one.jpg'), page('https://example.com/two.jpg'), page('https://example.com/three.jpg')])
+	const first = await f.fetchRemotePlaylist(ref('Netease'))
+	f.importRemotePlaylist(first, 'update', { artwork: 'file:///custom.jpg' })
+	const updated = f.importRemotePlaylist(await f.fetchRemotePlaylist(ref('Netease')))
+	assert.equal(updated.artwork, 'https://example.com/two.jpg')
+	assert.equal(updated.coverImg, updated.artwork)
+	assert.ok(!updated.customCover)
+	const overridden = f.importRemotePlaylist(first, 'update', { artwork: 'file:///second-custom.jpg' })
+	assert.equal(overridden.coverImg, 'file:///second-custom.jpg')
+	assert.equal(overridden.customCover, true)
+	const refreshed = await f.refreshRemotePlaylist(first.id)
+	assert.equal(refreshed.artwork, 'https://example.com/three.jpg')
+	assert.equal(refreshed.coverImg, refreshed.artwork)
+	assert.ok(!refreshed.customCover)
+	assert.equal(f.playlists.length, 1)
+})
+
+await check('no valid new cover preserves existing artwork visibly and does not hash rounded numeric IDs', async () => {
+	for (const fields of [{ coverImg: 'file:///old.jpg', artwork: 'https://example.com/stale.jpg' },
+		{ artwork: 'https://example.com/old.jpg' }]) {
+		const original = { id: 'remote:Netease:42', songs: [], remoteBinding: ref('Netease'), customCover: true, ...fields }
+		const f = fixture([{ code: 200, playlist: { trackCount: 0, tracks: [], coverImgUrl: 'invalid', coverImgId: 0 } }], [original])
+		const result = await f.refreshRemotePlaylist(original.id)
+		assert.equal(result.artwork, fields.coverImg || fields.artwork)
+		assert.equal(result.coverImg, result.artwork)
+		assert.ok(!result.customCover)
+	}
+	assert.equal(fixture().normalizeNeteaseSong({ ...netSong(1), al: { pic: 109951170048519520 } }).artwork, '')
+})
+
+await check('2000-song Netease import batches details and keeps the remote cover ahead of song artwork', async () => {
+	const ids = Array.from({ length: 2000 }, (_, i) => i + 1)
+	const f = fixture([{ code: 200, playlist: { trackCount: 2000, trackIds: ids.map(id => ({ id })), tracks: [],
+		coverImgUrl: 'https://example.com/playlist.jpg' } },
+		...Array.from({ length: 10 }, (_, i) => ({ code: 200, songs: ids.slice(i * 200, i * 200 + 200).reverse().map(netSong) }))])
+	const result = f.importRemotePlaylist(await f.fetchRemotePlaylist(ref('Netease')))
+	assert.deepEqual(plain(result.songs.map(item => Number(item.id))), ids)
+	assert.equal(f.calls.length, 11)
+	assert.equal(result.artwork, 'https://example.com/playlist.jpg')
+	assert.equal(result.coverImg, result.artwork)
+	assert.ok(result.songs.every(item => item.artwork.startsWith('https://')))
 })
 
 for (const [name, playlist, details = []] of [

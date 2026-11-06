@@ -4,7 +4,7 @@ import myTrackPlayer from '@/helpers/trackPlayerIndex'
 import { useQueue } from '@/store/queue'
 import { useUtilsStyles } from '@/styles'
 import { isSameMediaItem } from '@/utils/mediaItem'
-import { FlashList } from '@shopify/flash-list'
+import { FlashList, FlashListProps } from '@shopify/flash-list'
 import { router } from 'expo-router'
 import React, { useCallback, useMemo } from 'react'
 import { StyleProp, Text, View, ViewStyle } from 'react-native'
@@ -16,12 +16,14 @@ export type TracksListProps = {
 	id: string
 	tracks: Track[]
 	scrollEnabled?: boolean
+	style?: FlashListProps<Track>['style']
+	contentInsetAdjustmentBehavior?: FlashListProps<Track>['contentInsetAdjustmentBehavior']
 	hideQueueControls?: boolean
 	ListHeaderComponent?: React.ReactNode
 	ListHeaderComponentStyle?: StyleProp<ViewStyle>
 	isSinger?: boolean
 	allowDelete?: boolean
-	onDeleteTrack?: (trackId: string) => void
+	onDeleteTrack?: (trackId: string, track: Track) => void
 	isMultiSelectMode?: boolean
 	selectedTracks?: Set<string>
 	onToggleSelection?: (trackId: string) => void
@@ -36,6 +38,8 @@ export const TracksList = React.memo(
 		id,
 		tracks,
 		scrollEnabled = true,
+		style,
+		contentInsetAdjustmentBehavior,
 		hideQueueControls = false,
 		ListHeaderComponent,
 		ListHeaderComponentStyle,
@@ -118,7 +122,7 @@ export const TracksList = React.memo(
 						isPlaying={isActiveTrack && !!playing}
 						isSinger={isSinger}
 						allowDelete={allowDelete}
-						onDeleteTrack={onDeleteTrack}
+						onDeleteTrack={onDeleteTrack ? (trackId) => onDeleteTrack(trackId, track) : undefined}
 						isMultiSelectMode={isMultiSelectMode}
 						onToggleSelection={onToggleSelection}
 						selectedTracks={selectedTracks}
@@ -175,10 +179,12 @@ export const TracksList = React.memo(
 			[currentMusic?.id, currentMusic?.platform, playing, isMultiSelectMode, selectedTracks],
 		)
 
-		const keyExtractor = useCallback((item: Track) => item.id, [])
+		const keyExtractor = useCallback((item: Track) => JSON.stringify([item.platform ?? null, item.id]), [])
 
 		return (
 			<FlashList
+				style={style}
+				contentInsetAdjustmentBehavior={contentInsetAdjustmentBehavior}
 				data={tracks}
 				extraData={listExtraData}
 				scrollEnabled={scrollEnabled}
