@@ -20,7 +20,7 @@ export const deferred = () => {
 export const flush = () => new Promise(resolve => setImmediate(resolve))
 export const script = name => `/**\n * @name ${name}\n * @description source fixture\n * @version 1.2.3\n * @author CyMusic\n * @homepage https://example.test\n */\nlx.on(lx.EVENT_NAMES.request, () => Promise.resolve('https://example.test/audio'))`
 
-export function createSourceFixture({ fetch: fetchImpl = globalThis.fetch } = {}) {
+export function createSourceFixture({ fetch: fetchImpl = globalThis.fetch, imports = {} } = {}) {
 	let now = 0
 	let nextTimer = 0
 	const timers = new Map()
@@ -112,6 +112,7 @@ export function createSourceFixture({ fetch: fetchImpl = globalThis.fetch } = {}
 			},
 		}).outputText
 		const imported = specifier => {
+			if (specifier in imports) return imports[specifier]
 			if (specifier === 'expo') return { requireNativeModule(name) {
 				assert.equal(name, 'UserApiModule')
 				return native

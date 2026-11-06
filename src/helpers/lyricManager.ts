@@ -106,7 +106,7 @@ async function refreshLyric(fromStart?: boolean, forceRequest = false, positionO
 
 		if (!shouldRebuildParser(musicItem, lyricParser, rawLrc, rawTranslation, lyricDelaySeconds, forceRequest)) {
 			if (fromStart) {
-				currentLyricStore.setValue(lyricParser?.getLyric()[0] || null)
+				updateCurrentLyricByPosition(positionOverride ?? 0, lyricParser)
 				return
 			}
 			if (positionOverride !== undefined) {
@@ -140,7 +140,7 @@ async function refreshLyric(fromStart?: boolean, forceRequest = false, positionO
 		lastLyricDelaySeconds = lyricDelaySeconds
 
 		if (fromStart) {
-			currentLyricStore.setValue(parser.getLyric()[0] || null)
+			updateCurrentLyricByPosition(positionOverride ?? 0, parser)
 			return
 		}
 		if (positionOverride !== undefined) {

@@ -415,6 +415,7 @@ export function createFixture() {
 			'@/utils/i18n': { nowLanguage: state('en') },
 			'@/utils/utils': { showToast: (...args) => calls.toasts.push(args) },
 			'@/helpers/userApi/lxMusicSourceAdapter': {
+				disposeLxMusicScript() {},
 				isLxMusicScript: () => false,
 				reloadLxMusicScript: async (api) => api,
 			},

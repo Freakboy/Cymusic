@@ -11,8 +11,14 @@ function runtime() {
 	const h = fixture.runtime()
 	const { player, stores } = h
 	const adapters = { disposeLxMusicScript() {}, isLxMusicScript: () => false, reloadLxMusicScript: async (api) => api }
-	const { withSourceRuntimeLock } = loadModule('src/player/sourceResolver/runtime.ts', {
+	const sourceRuntime = loadModule('src/player/sourceResolver/runtime.ts', {
 		'@/helpers/userApi/lxMusicSourceAdapter': adapters,
+	})
+	const { withSourceRuntimeLock } = sourceRuntime
+	const sourceLyric = loadModule('src/helpers/sourceLyric.ts', {
+		'@/player/PlayerStore': stores,
+		'@/player/sourceResolver/runtime': sourceRuntime,
+		'@/utils/lrcParser': h.load('src/utils/lrcParser.ts'),
 	})
 	Object.assign(player, h.load('node_modules/@rntp/player/src/events/index.ts'))
 	stores.preloadNextTrackStore = state(true)
@@ -80,6 +86,9 @@ function runtime() {
 		'react-native': { Alert: { alert: (...args) => h.calls.alerts.push(args) }, AppState: { currentState: 'active' },
 			Image: { resolveAssetSource: () => ({ uri: 'file:///app/silence.mp3' }) } },
 		'@/helpers/userApi/getMusicSource': { myGetLyric: async (track) => ({ lyric: `lyric:${track.id}` }) },
+		'./sourceLyric': sourceLyric,
+		'@/player/sourceResolver/qqMatch': h.load('src/player/sourceResolver/qqMatch.ts'),
+		'@/player/sourceIdentity': h.load('src/player/sourceIdentity.ts'),
 		'@/constants/images': { fakeAudioMp3Uri: 'file:///app/silence.mp3' },
 		'@/utils/i18n': { nowLanguage: state('zh') },
 		'@/utils/utils': { showToast() {} },

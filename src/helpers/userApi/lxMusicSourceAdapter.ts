@@ -18,6 +18,7 @@ import {
 } from '@/components/utils/nativeModules/userApi'
 import { Buffer } from 'buffer'
 import { logError, logInfo } from '../logger'
+import type { SourceCapabilities, SourceMusicApi } from './importMusicSource'
 
 // ============================================================
 // 格式检测
@@ -91,7 +92,8 @@ type LxRequestContext = {
 }
 
 type PendingRequest = {
-	resolve: (url: string) => void
+	resolve: (result: unknown) => void
+	action: 'musicUrl' | 'lyric'
 	reject: (err: Error) => void
 	requestKey: string
 	requestType: LxRequestType
@@ -113,6 +115,7 @@ type LxRuntime = {
 	settledRequestTypes: Map<string, SettledRequest>
 	pendingHttpRequests: Map<string, HttpRequest>
 	inited: boolean
+	sources?: SourceCapabilities
 	disposed: boolean
 	init: { resolve: () => void, reject: (err: Error) => void } | null
 	removeListener: (() => void) | null
@@ -230,9 +233,11 @@ const handleScriptAction = (runtime: LxRuntime, event: any) => {
 
 	switch (event.action) {
 		case 'init': {
+			if (runtime.inited) break
 			// 脚本初始化完成
 			const data = event.data
 			if (data.status) {
+				runtime.sources = data.info?.sources
 				logInfo('[lxMusicAdapter] Script initialized successfully')
 				runtime.inited = true
 				runtime.init?.resolve()
@@ -272,7 +277,9 @@ const handleScriptAction = (runtime: LxRuntime, event: any) => {
 				)
 				if (respData.status) {
 					const result = respData.result as any
-					if (result?.action === 'musicUrl') {
+					if (result?.action !== pending.action) {
+						pending.reject(new Error('Script returned unexpected response action'))
+					} else if (result.action === 'musicUrl') {
 						const url = result?.data?.url
 						if (typeof url === 'string' && /^https?:/.test(url)) {
 							logInfo(`${logPrefix} musicUrl resolved: ${url}`)
@@ -281,7 +288,7 @@ const handleScriptAction = (runtime: LxRuntime, event: any) => {
 							pending.reject(new Error('Script returned invalid musicUrl'))
 						}
 					} else {
-						pending.resolve(result as string)
+						pending.resolve(result.data)
 					}
 				} else {
 					if (pending.requestType === 'current') {
@@ -493,19 +500,25 @@ const initLxMusicScript = (
 }
 
 /**
- * 通过 JavaScriptCore 脚本获取音乐 URL
+ * 通过 JavaScriptCore 脚本请求音乐 URL 或歌词
  */
-const getMusicUrlViaScript = (
+const requestViaScript = <T = string>(
 	runtime: LxRuntime,
 	title: string,
 	artist: string,
 	songmid: string,
 	quality: string,
 	requestContext?: LxRequestContext,
-): Promise<string> => {
+	action: 'musicUrl' | 'lyric' = 'musicUrl',
+): Promise<T> => {
 	return new Promise((resolve, reject) => {
 		if (!isActiveRuntime(runtime) || !runtime.inited) {
 			reject(new Error('音源脚本未初始化或已销毁'))
+			return
+		}
+		const tx = runtime.sources?.tx
+		if (action === 'lyric' && (!tx || !tx.actions?.includes('lyric'))) {
+			reject(new Error('TX lyrics are not supported by this source'))
 			return
 		}
 		const requestType = requestContext?.requestType ?? 'current'
@@ -520,16 +533,16 @@ const getMusicUrlViaScript = (
 
 		const timeout = setTimeout(() => {
 			if (runtime.pendingRequests.get(wireRequestKey) !== pending) return
-			pending.reject(new Error('获取音乐 URL 超时'))
+			pending.reject(new Error(`${action} request timeout`))
 			rememberSettledRequestType(runtime, wireRequestKey, pending)
 		}, timeoutMs)
 
 		const pending: PendingRequest = {
-			resolve: (url: string) => {
+			resolve: (result: unknown) => {
 				if (runtime.pendingRequests.get(wireRequestKey) !== pending) return
 				runtime.pendingRequests.delete(wireRequestKey)
 				clearTimeout(timeout)
-				resolve(url)
+				resolve(result as T)
 			},
 			reject: (err: Error) => {
 				if (runtime.pendingRequests.get(wireRequestKey) !== pending) return
@@ -539,17 +552,18 @@ const getMusicUrlViaScript = (
 			},
 			requestKey,
 			requestType,
+			action,
 		}
 		runtime.pendingRequests.set(wireRequestKey, pending)
 
-		logInfo(`${logPrefix} Sending musicUrl request: ${title} - ${artist}`)
+		logInfo(`${logPrefix} Sending ${action} request: ${title} - ${artist}`)
 
-		// 向 JavaScriptCore 脚本发送 musicUrl 请求
+		// 向 JavaScriptCore 脚本发送请求
 		try {
 			sendAction('request', {
 				requestKey: wireRequestKey,
 				data: {
-					action: 'musicUrl',
+					action,
 					source: 'tx',
 					info: {
 						musicInfo: {
@@ -566,7 +580,7 @@ const getMusicUrlViaScript = (
 							requestKey,
 							requestType,
 						},
-						type: quality || '128k',
+						...(action === 'musicUrl' ? { type: quality || '128k' } : {}),
 					},
 				},
 			} as any)
@@ -576,12 +590,26 @@ const getMusicUrlViaScript = (
 	})
 }
 
+const runtimeMethods = (runtime: LxRuntime) => {
+	const tx = runtime.sources?.tx
+	return {
+		sources: runtime.sources,
+		getMusicUrl: (title: string, artist: string, songmid: string, quality: string,
+			requestContext?: LxRequestContext) =>
+			requestViaScript(runtime, title, artist, songmid, quality, requestContext),
+		getLyric: tx && tx.actions?.includes('lyric')
+			? (title: string, artist: string, songmid: string) =>
+				requestViaScript<unknown>(runtime, title, artist, songmid, '', undefined, 'lyric')
+			: undefined,
+	}
+}
+
 /**
  * 将 lx-music 格式脚本适配为 Cymusic 的 MusicApi 对象
  */
 export const adaptLxMusicScript = async (
 	script: string,
-): Promise<IMusic.MusicApi> => {
+): Promise<SourceMusicApi> => {
 	const info = parseLxMusicScriptInfo(script)
 
 	const scriptId = info.name
@@ -593,7 +621,7 @@ export const adaptLxMusicScript = async (
 
 	logInfo(`[lxMusicAdapter] Script loaded successfully: ${info.name}`)
 
-	const musicApi: IMusic.MusicApi = {
+	const musicApi: SourceMusicApi = {
 		id: scriptId,
 		platform: 'tx',
 		author: info.author || '',
@@ -603,13 +631,7 @@ export const adaptLxMusicScript = async (
 		script: script,
 		scriptType: 'lxmusic' as const,
 		isSelected: false,
-		getMusicUrl: (
-			title: string,
-			artist: string,
-			songmid: string,
-			quality: string,
-			requestContext?: LxRequestContext,
-		) => getMusicUrlViaScript(runtime, title, artist, songmid, quality, requestContext),
+		...runtimeMethods(runtime),
 	}
 
 	return musicApi
@@ -620,20 +642,14 @@ export const adaptLxMusicScript = async (
  */
 export const reloadLxMusicScript = async (
 	musicApi: IMusic.MusicApi,
-): Promise<IMusic.MusicApi> => {
+): Promise<SourceMusicApi> => {
 	try {
 		const info = parseLxMusicScriptInfo(musicApi.script)
 		const runtime = await initLxMusicScript(musicApi.id, info, musicApi.script)
 
 		return {
 			...musicApi,
-			getMusicUrl: (
-				title: string,
-				artist: string,
-				songmid: string,
-				quality: string,
-				requestContext?: LxRequestContext,
-			) => getMusicUrlViaScript(runtime, title, artist, songmid, quality, requestContext),
+			...runtimeMethods(runtime),
 		}
 	} catch (err) {
 		logError(

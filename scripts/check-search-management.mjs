@@ -123,8 +123,7 @@ function load(path, imports, timers = clock()) {
 		slots = [],
 		effects = []
 	let cursor = 0,
-		tree,
-		options
+		tree
 	const changed = (a, b) => !a || a.length !== b.length || a.some((value, i) => value !== b[i])
 	const react = {
 		useState(initial) {
@@ -164,11 +163,6 @@ function load(path, imports, timers = clock()) {
 	}
 	react.useLayoutEffect = react.useEffect
 	const calls = []
-	const navigation = {
-		setOptions(value) {
-			options = value.headerSearchBarOptions
-		},
-	}
 	const jsx = (type, props) => ({ type, props })
 	let Screen = load(
 		'src/app/(tabs)/search/index.tsx',
@@ -187,9 +181,9 @@ function load(path, imports, timers = clock()) {
 				__esModule: true,
 			},
 			'@/locales/sourceSearch': { useSourceSearchText: () => labels },
-			'expo-router': { useNavigation: () => navigation },
 			'@/utils/i18n': { t: (key) => key },
 			'react-native': {
+				TextInput: 'TextInput',
 				View: 'View',
 				Text: 'Text',
 				Pressable: 'Pressable',
@@ -201,7 +195,14 @@ function load(path, imports, timers = clock()) {
 		},
 		timers,
 	).default
-	const labels = { albums: 'Albums', playlists: 'Playlists', retry: 'Retry', searchError: 'Error' }
+	const labels = {
+		albums: 'Albums',
+		playlists: 'Playlists',
+		retry: 'Retry',
+		searchError: 'Error',
+		songSearch: 'Songs or artists',
+		clearSearch: 'Clear',
+	}
 	const render = () => {
 		cursor = 0
 		tree = Screen()
@@ -213,10 +214,15 @@ function load(path, imports, timers = clock()) {
 	}
 	const list = () => nodes(tree).find((node) => node.type === 'SearchList').props
 	const input = (value) => {
-		options.onChangeText({ nativeEvent: { text: value } })
+		const field = nodes(tree).find((node) => node.type === 'TextInput')
+		assert.ok(field, 'Search tab must render a visible TextInput without native header support')
+		field.props.onChangeText(value)
 		render()
 	}
 	render()
+	const field = nodes(tree).find((node) => node.type === 'TextInput')
+	assert.ok(field, 'Search tab must render a visible TextInput without native header support')
+	assert.equal(field.props.style.minHeight, 44)
 	input('a')
 	timers.advance(349)
 	assert.equal(calls.length, 0)
@@ -252,7 +258,9 @@ function load(path, imports, timers = clock()) {
 	await flush()
 	render()
 	assert.equal(list().tracks.length, 2)
-	const artist = nodes(tree).filter((node) => node.type === 'Pressable')[1]
+	const artist = nodes(tree).find(
+		(node) => node.type === 'Pressable' && node.props.children?.props?.children === 'find.artists',
+	)
 	artist.props.onPress()
 	render()
 	timers.advance(350)
@@ -268,16 +276,46 @@ function load(path, imports, timers = clock()) {
 	await flush()
 	render()
 	// Batched changes can end at the same keyword React already rendered.
-	options.onChangeText({ nativeEvent: { text: 'temporary' } })
-	options.onChangeText({ nativeEvent: { text: 'revisit' } })
+	nodes(tree)
+		.find((node) => node.type === 'TextInput')
+		.props.onChangeText('temporary')
+	nodes(tree)
+		.find((node) => node.type === 'TextInput')
+		.props.onChangeText('revisit')
 	render()
 	timers.advance(350)
 	assert.equal(calls.length, 7)
 	assert.equal(calls[6].args[0], 'revisit')
+	for (const [label, type] of [
+		['Albums', 'albums'],
+		['Playlists', 'playlists'],
+		['find.songs', 'songs'],
+	]) {
+		const button = nodes(tree).find(
+			(node) => node.type === 'Pressable' && node.props.children?.props?.children === label,
+		)
+		assert.equal(button.props.style[0].minHeight, 44)
+		button.props.onPress()
+		render()
+		timers.advance(350)
+		assert.equal(calls.at(-1).args[2], type)
+		calls.at(-1).resolve({ data: [{ id: type }], hasMore: false })
+		await flush()
+		render()
+		assert.equal(list().tracks[0].id, type)
+	}
+	nodes(tree)
+		.find((node) => node.type === 'Pressable' && node.props.accessibilityLabel === 'Clear')
+		.props.onPress()
+	render()
+	render()
+	assert.equal(nodes(tree).find((node) => node.type === 'TextInput').props.value, '')
+	assert.equal(list().tracks.length, 0)
+	const requestCount = calls.length
 	input('unmount')
 	for (const slot of slots) slot?.cleanup?.()
 	timers.advance(350)
-	assert.equal(calls.length, 7)
+	assert.equal(calls.length, requestCount)
 
 	// Collection pages advance by the returned count, not the requested size.
 	slots.length = 0
@@ -408,6 +446,27 @@ function load(path, imports, timers = clock()) {
 			'@/store/PersistStatus': { set: (key, value) => saved.set(key, value) },
 		},
 		timers,
+	)
+	assert.equal(
+		helper
+			.describeSourceChannels({ platform: 'tx' })
+			.every((channel) => channel.state === 'undeclared'),
+		true,
+	)
+	const channels = helper.describeSourceChannels({
+		sources: {
+			tx: { actions: ['musicUrl'], qualitys: ['128k'] },
+			wy: { actions: [] },
+			kg: false,
+		},
+	})
+	assert.deepEqual(
+		Array.from(channels, (channel) => channel.id),
+		['tx', 'wy', 'kg', 'kw', 'mg'],
+	)
+	assert.deepEqual(
+		Array.from(channels, (channel) => channel.state),
+		['supported', 'unsupported', 'unsupported', 'undeclared', 'undeclared'],
 	)
 	const lx = (version = '1') =>
 		`/**\n * @name fixture\n * @author author\n * @version ${version}\n * @homepage https://homepage.test\n */\nlx.on(lx.EVENT_NAMES.request, () => {});`
@@ -551,6 +610,8 @@ function load(path, imports, timers = clock()) {
 			setMusicApiAsSelectedById: async (id) => calls.push(['reload', id]),
 		},
 		'@/helpers/sourceManagement': {
+			describeSourceChannels: () =>
+				['tx', 'wy', 'kg', 'kw', 'mg'].map((id) => ({ id, state: 'undeclared', qualitys: [] })),
 			assertSourceIdle() {},
 			fetchManagedSourceScript: async (url) => {
 				calls.push(['fetch', url])

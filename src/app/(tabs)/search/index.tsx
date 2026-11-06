@@ -3,16 +3,22 @@ import { ThemeColors } from '@/constants/tokens'
 import { useThemeColors } from '@/hooks/useAppTheme'
 import searchAll, { SearchType } from '@/helpers/searchAll'
 import { useSourceSearchText } from '@/locales/sourceSearch'
-import { useNavigation } from 'expo-router'
 import i18n from '@/utils/i18n'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Animated, useWindowDimensions, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+	Animated,
+	useWindowDimensions,
+	Pressable,
+	StyleSheet,
+	Text,
+	TextInput,
+	View,
+} from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import type { Track } from '@/player/types'
 
 const SearchlistsScreen = () => {
 	const text = useSourceSearchText()
-	const navigation = useNavigation()
 	const [search, setSearch] = useState('')
 	// Batched A -> B -> A edits still need a fresh request generation.
 	const [revision, setRevision] = useState(0)
@@ -39,32 +45,15 @@ const SearchlistsScreen = () => {
 			friction: 10,
 		}).start()
 	}, [searchType, SEGMENT_WIDTH, slideAnim])
-	useLayoutEffect(() => {
-		navigation.setOptions({
-			headerSearchBarOptions: {
-				placeholder: i18n.t('find.inSearch'),
-				cancelButtonText: i18n.t('find.cancel'),
-				onChangeText: ({ nativeEvent: { text: value } }: { nativeEvent: { text: string } }) => {
-					if (input.current === value) return
-					input.current = value
-					++searchRequestRef.current
-					pending.current = true
-					controller.current?.abort()
-					setSearch(value)
-					setRevision((value) => value + 1)
-				},
-				onCancelButtonPress: () => {
-					if (input.current === '') return
-					input.current = ''
-					++searchRequestRef.current
-					pending.current = true
-					controller.current?.abort()
-					setSearch('')
-					setRevision((value) => value + 1)
-				},
-			},
-		})
-	}, [navigation, text])
+	const handleSearchChange = (value: string) => {
+		if (input.current === value) return
+		input.current = value
+		++searchRequestRef.current
+		pending.current = true
+		controller.current?.abort()
+		setSearch(value)
+		setRevision((value) => value + 1)
+	}
 
 	const fetchSearchResults = useCallback(
 		async (currentPage: number) => {
@@ -153,6 +142,27 @@ const SearchlistsScreen = () => {
 	return (
 		<SafeAreaView style={styles.safeArea} edges={['left', 'right']}>
 			<View style={styles.contentContainer}>
+				<View style={styles.searchRow}>
+					<TextInput
+						style={styles.searchInput}
+						value={search}
+						onChangeText={handleSearchChange}
+						placeholder={text.songSearch}
+						accessibilityLabel={text.songSearch}
+						placeholderTextColor={colors.placeholder}
+						autoCapitalize="none"
+						autoCorrect={false}
+						returnKeyType="search"
+					/>
+					<Pressable
+						accessibilityRole="button"
+						accessibilityLabel={text.clearSearch}
+						onPress={() => handleSearchChange('')}
+						style={styles.clearButton}
+					>
+						<Text style={{ color: colors.primary }}>{text.clearSearch}</Text>
+					</Pressable>
+				</View>
 				<View style={styles.segmentedControlContainer}>
 					<View style={styles.segmentedControl}>
 						<Animated.View
@@ -208,6 +218,28 @@ const createStyles = (colors: ThemeColors) =>
 			backgroundColor: colors.background,
 			paddingTop: 8,
 		},
+		searchRow: {
+			flexDirection: 'row',
+			alignItems: 'center',
+			marginHorizontal: 16,
+			marginBottom: 8,
+			gap: 8,
+		},
+		searchInput: {
+			flex: 1,
+			minHeight: 44,
+			borderRadius: 8,
+			paddingHorizontal: 12,
+			fontSize: 16,
+			color: colors.text,
+			backgroundColor: colors.surfaceMuted,
+		},
+		clearButton: {
+			minHeight: 44,
+			minWidth: 44,
+			justifyContent: 'center',
+			alignItems: 'center',
+		},
 		segmentedControlContainer: {
 			paddingHorizontal: 16,
 			marginTop: 0,
@@ -221,6 +253,7 @@ const createStyles = (colors: ThemeColors) =>
 			position: 'relative',
 		},
 		segment: {
+			minHeight: 44,
 			flex: 1,
 			paddingVertical: 6,
 			alignItems: 'center',

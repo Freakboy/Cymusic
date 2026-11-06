@@ -36,10 +36,14 @@
 			"songsNumsToLoad": "Songs Nums to Load"
 		},
 		"descriptions": {
-			"bluetoothLyrics": "Append the current lyric to the system track title, including Lock Screen and CarPlay. Off by default; accessory support varies.",
+			"bluetoothLyrics": "Show only the current lyric in the system title. Restore the song name when lyrics are absent or disabled. Affects Lock Screen and CarPlay; accessory support varies.",
 			"preciseSeeking": "Helps keep audio and lyrics aligned after seeking in some FLAC files. Playback may wait for the full audio file to load. Applies after changing tracks."
 		},
 		"actions": {
+			"preloadNextTrack": {
+				"yes": "On",
+				"no": "Off"
+			},
 			"import": {
 				"title": "Import Music Source",
 				"fromFile": "Import from File",
@@ -84,10 +88,6 @@
 				"delete": "Delete",
 				"selectDelete": "Select Delete"
 			}
-		},
-		"preloadNextTrack": {
-			"yes": "On",
-			"no": "Off"
 		},
 		"placeholders": {
 			"enterSourceUrl": "Please enter the source URL"

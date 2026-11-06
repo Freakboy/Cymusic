@@ -64,13 +64,24 @@ jobs:
           test -d ios/build/Build/Products/Release-iphoneos/CyMusic.app/PlugIns/ShareExtension.appex
 
       - name: Package IPA
+        id: package
         run: |
+          app_path="ios/build/Build/Products/Release-iphoneos/CyMusic.app"
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Info.plist")
+          build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/Info.plist")
+          [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]]
+          [[ "$build" =~ ^[0-9]+(\.[0-9]+)*$ ]]
+          artifact_name="CyMusic-${version}-build${build}-unsigned"
+          ipa_name="${artifact_name}.ipa"
           mkdir -p Payload
-          cp -r ios/build/Build/Products/Release-iphoneos/CyMusic.app Payload/
-          zip -r CyMusic-unsigned.ipa Payload/
+          cp -r "$app_path" Payload/
+          zip -r "$ipa_name" Payload/
+          echo "ipa_name=$ipa_name" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: CyMusic-unsigned-ipa
-          path: CyMusic-unsigned.ipa
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.ipa_name }}
+          if-no-files-found: error

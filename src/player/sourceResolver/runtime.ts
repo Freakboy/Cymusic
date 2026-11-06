@@ -3,6 +3,7 @@ import {
 	isLxMusicScript,
 	reloadLxMusicScript,
 } from '@/helpers/userApi/lxMusicSourceAdapter'
+import type { ModuleExports, SourceMusicApi } from '@/helpers/userApi/importMusicSource'
 
 const queue: { priority: number; run: () => Promise<void> }[] = []
 let running = false
@@ -44,13 +45,21 @@ export const isLxSource = (api: IMusic.MusicApi) =>
 	api.scriptType === 'lxmusic' || isLxMusicScript(api.script || '')
 
 // Only invoke under withSourceRuntimeLock, including user-driven source reloads.
-export async function loadResolverSource(api: IMusic.MusicApi): Promise<IMusic.MusicApi> {
+export async function loadResolverSource(
+	api: IMusic.MusicApi,
+	reload = false,
+): Promise<SourceMusicApi> {
 	if (isLxSource(api)) return reloadLxMusicScript(api)
-	if (typeof api.getMusicUrl === 'function') return api
-	const module = { exports: {} as { getMusicUrl?: IMusic.MusicApi['getMusicUrl'] } }
+	if (!reload && typeof api.getMusicUrl === 'function') return api
+	const module = { exports: {} as ModuleExports }
 	new Function('module', 'exports', 'require', api.script)(module, module.exports, () => {})
 	if (typeof module.exports.getMusicUrl !== 'function') throw new Error('INVALID_SOURCE_SCRIPT')
-	return { ...api, getMusicUrl: module.exports.getMusicUrl }
+	return {
+		...api,
+		getMusicUrl: module.exports.getMusicUrl,
+		getLyric: typeof module.exports.getLyric === 'function' ? module.exports.getLyric : undefined,
+		sources: module.exports.sources,
+	}
 }
 
 export function releaseResolverRuntime() {

@@ -16,6 +16,8 @@ const SongsScreenLayout = () => {
 					name="index"
 					options={{
 						...getStackScreenWithSearchBar(colors),
+						headerLargeTitle: false,
+						headerTransparent: false,
 						headerTitle: i18n.t('appTab.songs'),
 						headerRight: () => <GlobalButton />,
 					}}

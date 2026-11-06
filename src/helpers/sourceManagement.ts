@@ -4,6 +4,23 @@ import { isLxMusicScript, parseLxMusicScriptInfo } from '@/helpers/userApi/lxMus
 import { musicApiSelectedStore, musicApiStore, trackSourceLoadingStore } from '@/player/PlayerStore'
 import PersistStatus from '@/store/PersistStatus'
 import { withSourceRuntimeLock } from '@/player/MusicSourceResolver'
+import type { SourceMusicApi } from './userApi/importMusicSource'
+
+export function describeSourceChannels(source: SourceMusicApi) {
+	return (['tx', 'wy', 'kg', 'kw', 'mg'] as const).map((id) => {
+		const capability = source.sources?.[id]
+		let state: 'supported' | 'undeclared' | 'unsupported' = 'undeclared'
+		if (capability === false || capability === null) state = 'unsupported'
+		else if (capability && Array.isArray(capability.actions)) {
+			state = capability.actions.includes('musicUrl') ? 'supported' : 'unsupported'
+		}
+		return {
+			id,
+			state,
+			qualitys: capability && Array.isArray(capability.qualitys) ? capability.qualitys : [],
+		}
+	})
+}
 
 let testing = false
 

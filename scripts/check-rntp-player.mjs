@@ -918,6 +918,7 @@ await check('lyric/progress events reject another item, a retired queue timestam
 	const h = runtime()
 	await h.setup()
 	await h.facade.play(song('lyrics'))
+	await flush()
 	const lyrics = h.load('src/helpers/lyricManager.ts')
 	h.stores.nowLyricState.setValue('[00:00.00]zero\n[00:03.00]three')
 	await lyrics.default.setup()

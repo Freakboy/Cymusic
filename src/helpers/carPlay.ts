@@ -160,7 +160,7 @@ function createBridge(native: typeof NowPlaying | null, onDispose: () => void) {
 			lyricParser = source ? new LyricParser({ rawLrc: source }, track ?? undefined, { offset: delay }) : null
 		}
 		const text = lyricParser?.getPosition(myTrackPlayer.getProgress().position).lrc?.lrc || null
-		const title = text ? `${track?.title || ''} · ${text}` : track?.title || ''
+		const title = text || track?.title || ''
 		if (title !== projectedTitle) {
 			// RNTP owns Now Playing and re-anchors elapsed/rate on metadata writes.
 			// Slot 0 is still this owned item; a native advance to slot 1 cannot

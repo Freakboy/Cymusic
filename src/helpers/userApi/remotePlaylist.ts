@@ -1,3 +1,5 @@
+import { fetch } from 'expo/fetch'
+
 export type RemotePlaylistPlatform = 'QQ' | 'Netease'
 
 export type RemotePlaylistReference = {
@@ -17,22 +19,84 @@ export function remotePlaylistId(reference: Pick<RemotePlaylistReference, 'platf
 
 export function parseRemotePlaylistReference(input: string, preferredPlatform?: RemotePlaylistPlatform) {
 	const value = input.trim()
-	const detected = /music\.163\.com|网易云/i.test(value) ? 'Netease'
-		: /(?:^|[/.])(?:y\.)?qq\.com|企鹅音乐/i.test(value) ? 'QQ' : undefined
-	if (detected && preferredPlatform && detected !== preferredPlatform) return null
-	const platform = detected ?? preferredPlatform
-	if (!platform) return null
-	const match = value.match(/[?&](?:id|disstid)=(\d+)/i)
-		?? value.match(/\/playlist\/(\d+)/i) ?? value.match(/^\s*(\d+)\s*$/)
-	if (!match) return null
-	return { platform, remoteId: match[1], sourceUrl: value } satisfies RemotePlaylistReference
+	if (/^\d+$/.test(value)) {
+		return preferredPlatform ? { platform: preferredPlatform, remoteId: value, sourceUrl: value } : null
+	}
+	const link = playlistLink(value)
+	if (!link || (preferredPlatform && link.platform !== preferredPlatform)) return null
+	const { url, platform } = link
+	// The import screen uses this synchronous parser as its input gate.
+	if (link.short) return { platform, sourceUrl: url.href, remoteId: undefined }
+	const path = url.hash.startsWith('#/') ? url.hash.slice(1) : `${url.pathname}${url.search}`
+	const page = new URL(path, url.origin)
+	const remoteId = page.pathname.match(/^\/(?:n\/(?:ryqq|yqq)\/)?playlist\/(\d+)(?:\.html)?\/?$/i)?.[1]
+		?? (platform === 'QQ' ? page.searchParams.get('disstid') : null)
+		?? (/^\/(?:m\/)?playlist\/?$/i.test(page.pathname)
+			|| (platform === 'QQ' && /\/share\/details\/taoge\.html$/i.test(page.pathname)) ? page.searchParams.get('id') : null)
+	if (!remoteId || !/^\d+$/.test(remoteId)) return null
+	return { platform, remoteId, sourceUrl: url.href } satisfies RemotePlaylistReference
+}
+
+function playlistLink(input: string) {
+	const value = input.match(/https?:\/\/[^\s<>"'`，。；！？（）【】《》]+/i)?.[0].replace(/[)\].,;!]+$/, '')
+	if (!value) return null
+	try {
+		const url = new URL(value.replace(/&amp;/g, '&'))
+		if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.port) return null
+		url.protocol = 'https:'
+		const host = url.hostname.toLowerCase()
+		const platform: RemotePlaylistPlatform | undefined = host === 'music.163.com' || host.endsWith('.music.163.com') || host === '163cn.tv' ? 'Netease'
+			: host === 'y.qq.com' || host.endsWith('.y.qq.com') ? 'QQ' : undefined
+		const short = host === '163cn.tv' ? /^\/[a-z0-9]+\/?$/i.test(url.pathname)
+			: platform === 'QQ' && url.pathname === '/base/fcgi-bin/u' && !!url.searchParams.get('__')
+		return platform ? { url, platform, short } : null
+	} catch {
+		return null
+	}
+}
+
+async function resolvePlaylistReference(input: string, preferredPlatform?: RemotePlaylistPlatform) {
+	const direct = parseRemotePlaylistReference(input, preferredPlatform)
+	if (direct?.remoteId) return { ...direct, remoteId: direct.remoteId }
+	const link = playlistLink(input)
+	if (!link?.short || (preferredPlatform && link.platform !== preferredPlatform)) {
+		throw new Error('无法识别歌单链接，或链接与所选平台不符')
+	}
+	const controller = new AbortController()
+	const timer = setTimeout(() => controller.abort(), 20000)
+	const sourceUrl = link.url.href
+	let url = link.url
+	try {
+		// One deadline for the whole chain; validate every Location before requesting it.
+		for (let redirects = 0; redirects <= 5; redirects++) {
+			const response = await fetch(url.href, { redirect: 'manual', credentials: 'omit', signal: controller.signal })
+			if (response.redirected) throw new Error('短链请求未能禁用自动跳转')
+			if (![301, 302, 303, 307, 308].includes(response.status)) {
+				throw new Error(`短链未返回歌单跳转 (HTTP ${response.status})`)
+			}
+			const location = response.headers.get('location')
+			if (!location) throw new Error('短链跳转地址缺失')
+			const next = playlistLink(new URL(location, url).href)
+			if (!next || next.platform !== link.platform) throw new Error('短链只能跳转到同平台官方域名')
+			if (redirects === 5) throw new Error('短链跳转超过 5 次')
+			const reference = parseRemotePlaylistReference(next.url.href, link.platform)
+			if (reference?.remoteId) return { ...reference, remoteId: reference.remoteId, sourceUrl }
+			if (!next.short) {
+				throw new Error('短链目标不是歌单链接')
+			}
+			url = next.url
+		}
+		throw new Error('无法解析歌单短链')
+	} finally {
+		clearTimeout(timer)
+	}
 }
 
 async function requestJson(url: string, headers?: Record<string, string>) {
 	const controller = new AbortController()
 	const timer = setTimeout(() => controller.abort(), 20000)
 	try {
-		const response = await fetch(url, { signal: controller.signal, headers })
+		const response = await fetch(url, { signal: controller.signal, headers, credentials: 'omit', redirect: 'error' })
 		if (!response.ok) throw new Error(`歌单请求失败 (HTTP ${response.status})`)
 		const data = await response.json()
 		if (data.code != null && data.code !== 0 && data.code !== 200) {
@@ -67,7 +131,8 @@ async function fetchNeteasePlaylist(reference: RemotePlaylistReference) {
 	const data = await requestJson(`https://music.163.com/api/v6/playlist/detail?id=${encodeURIComponent(reference.remoteId)}&n=100000&s=0`)
 	const playlist = data?.playlist ?? data?.result
 	if (!playlist) throw new Error('网易云歌单不存在或不可访问')
-	const total = count(playlist.trackCount)
+	// Use the ordered ID inventory, not tracks.length; an explicit count still detects server caps.
+	const total = count(playlist.trackCount === undefined && Array.isArray(playlist.trackIds) ? playlist.trackIds.length : playlist.trackCount)
 	if (!Array.isArray(playlist.tracks) && !Array.isArray(playlist.trackIds)) throw new Error('网易云歌曲列表缺失')
 	const tracks = Array.isArray(playlist.tracks) ? playlist.tracks : []
 	let ordered = tracks
@@ -109,6 +174,10 @@ async function fetchQQPlaylist(reference: RemotePlaylistReference) {
 		})
 		const page = (data?.data?.cdlist ?? data?.cdlist)?.[0]
 		if (!page || !Array.isArray(page.songlist)) throw new Error('QQ 歌单分页缺失')
+		if ((page.song_begin != null && count(page.song_begin) !== songs.length)
+			|| (page.cur_song_num != null && count(page.cur_song_num) !== page.songlist.length)) {
+			throw new Error('QQ 歌单分页位置或数量不一致，未更新本地数据')
+		}
 		const pageTotal = count(page.total_song_num ?? page.songnum)
 		if (metadata && total !== pageTotal) throw new Error('QQ 歌单在分页期间发生变化，请重试')
 		metadata = metadata ?? page
@@ -145,8 +214,7 @@ export async function fetchRemotePlaylist(reference: RemotePlaylistReference): P
 }
 
 export async function fetchRemotePlaylistFromInput(input: string, preferredPlatform?: RemotePlaylistPlatform) {
-	const reference = parseRemotePlaylistReference(input, preferredPlatform)
-	if (!reference) throw new Error('无法识别歌单链接，或链接与所选平台不符')
+	const reference = await resolvePlaylistReference(input, preferredPlatform)
 	return fetchRemotePlaylist(reference)
 }
 

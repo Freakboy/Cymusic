@@ -196,13 +196,13 @@ await suite.check('title projection uses real LRC positions/delay, deduplicates 
 	const h = runtime(); h.persist.set('music.bluetoothLyrics', true)
 	h.lyrics.setValue('[00:01]First\n[00:03]Second')
 	const bridge = await h.startCarPlayBridge(); h.setPosition(1); h.tick(); h.tick()
-	assert.deepEqual(h.metadata, [[0, { title: 'Song a \u00b7 First' }]])
-	h.setPosition(3); h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'Song a \u00b7 Second')
-	h.persist.set('lyric.delaySeconds', 2); h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'Song a \u00b7 First')
+	assert.deepEqual(h.metadata, [[0, { title: 'First' }]])
+	h.setPosition(3); h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'Second')
+	h.persist.set('lyric.delaySeconds', 2); h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'First')
 	h.persist.set('music.bluetoothLyrics', false); assert.equal(h.metadata.at(-1)[1].title, 'Song a')
 	const count = h.metadata.length; h.tick(); await bridge.setLyricTitleEnabled(false); assert.equal(h.metadata.length, count)
 	await bridge.setLyricTitleEnabled(true); assert.equal(h.persist.get('music.bluetoothLyrics'), true)
-	h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'Song a \u00b7 First')
+	h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'First')
 	bridge.dispose(); assert.equal(h.metadata.at(-1)[1].title, 'Song a')
 })
 
@@ -212,8 +212,8 @@ await suite.check('track transition never projects old lyrics into native next s
 	h.setActive(song('b')); h.tick(); assert.equal(h.metadata.length, count)
 	h.current.setValue(song('b')); h.lyrics.setValue(null); h.tick(); assert.equal(h.metadata.length, count)
 	h.setActive(h.current.getValue()); h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'Song b')
-	h.lyrics.setValue('[00:00]New'); h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'Song b \u00b7 New')
-	h.setActive(song('c')); bridge.dispose(); assert.equal(h.metadata.at(-1)[1].title, 'Song b \u00b7 New')
+	h.lyrics.setValue('[00:00]New'); h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'New')
+	h.setActive(song('c')); bridge.dispose(); assert.equal(h.metadata.at(-1)[1].title, 'New')
 })
 
 await suite.check('dispose removes subscriptions/timers, ignores late reads and allows a new singleton', async () => {

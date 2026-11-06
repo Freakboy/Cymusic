@@ -36,10 +36,14 @@
 			"songsNumsToLoad": "首页播放歌曲数量"
 		},
 		"descriptions": {
-			"bluetoothLyrics": "将当前歌词附加到系统歌曲标题，会影响锁屏和 CarPlay 显示。默认关闭，设备是否显示取决于车机。",
+			"bluetoothLyrics": "系统标题仅显示当前歌词，不重复歌名；没有歌词或关闭时恢复歌名。会影响锁屏和 CarPlay，设备显示取决于车机。",
 			"preciseSeeking": "改善部分 FLAC 快进后的音频与歌词不同步。开启后可能需要加载完整音频，播放前等待更久。切换歌曲后生效。"
 		},
 		"actions": {
+			"preloadNextTrack": {
+				"yes": "开启",
+				"no": "关闭"
+			},
 			"import": {
 				"title": "导入音源",
 				"fromFile": "从文件导入",
@@ -85,10 +89,6 @@
 				"delete": "删除",
 				"selectDelete": "选择删除"
 			}
-		},
-		"preloadNextTrack": {
-			"yes": "开启",
-			"no": "关闭"
 		},
 		"placeholders": {
 			"enterSourceUrl": "请输入音源 URL"

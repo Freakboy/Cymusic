@@ -1,11 +1,26 @@
 import { adaptLxMusicScript, isLxMusicScript } from './lxMusicSourceAdapter'
 
-interface ModuleExports {
+type SourceChannelCapability = {
+	type?: string
+	actions?: string[]
+	qualitys?: string[]
+}
+
+export type SourceCapabilities = Partial<Record<LX.Source, SourceChannelCapability | false | null>>
+
+export type SourceMusicApi = IMusic.MusicApi & {
+	sources?: SourceCapabilities
+	getLyric?: (title: string, artist: string, songmid: string) => Promise<unknown>
+}
+
+export interface ModuleExports {
 	id?: string
 	author?: string
 	name?: string
 	version?: string
 	srcUrl?: string
+	sources?: SourceCapabilities
+	getLyric?: SourceMusicApi['getLyric']
 	getMusicUrl?: (
 		songname: string,
 		artist: string,
@@ -14,7 +29,7 @@ interface ModuleExports {
 	) => Promise<string>
 }
 
-export async function createMusicApiFromScript(rawScript: string): Promise<IMusic.MusicApi> {
+export async function createMusicApiFromScript(rawScript: string): Promise<SourceMusicApi> {
 	const script = rawScript?.trim?.() ?? ''
 	if (!script) {
 		throw new Error('音源脚本为空')
@@ -44,6 +59,8 @@ export async function createMusicApiFromScript(rawScript: string): Promise<IMusi
 		scriptType: 'cymusic',
 		isSelected: false,
 		getMusicUrl: module.exports.getMusicUrl,
+		getLyric: typeof module.exports.getLyric === 'function' ? module.exports.getLyric : undefined,
+		sources: module.exports.sources,
 	}
 }
 
@@ -62,8 +79,5 @@ export async function fetchScriptFromUrl(url: string): Promise<string> {
 export function looksLikeScriptText(text?: string | null): boolean {
 	if (!text) return false
 	const normalized = text.trim()
-	return (
-		/module\s*\.\s*exports\s*\.\s*getMusicUrl/.test(normalized) ||
-		isLxMusicScript(normalized)
-	)
+	return /module\s*\.\s*exports\s*\.\s*getMusicUrl/.test(normalized) || isLxMusicScript(normalized)
 }

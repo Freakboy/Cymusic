@@ -13,8 +13,7 @@ function fixture(responses = [], initial = []) {
 	const calls = []
 	const writes = []
 	let playlists = initial
-	const remote = loadModule('src/helpers/userApi/remotePlaylist.ts', {}, {
-		...clock,
+	const remote = loadModule('src/helpers/userApi/remotePlaylist.ts', { 'expo/fetch': {
 		async fetch(url, options) {
 			calls.push({ url, options })
 			const response = responses.shift()
@@ -23,7 +22,7 @@ function fixture(responses = [], initial = []) {
 			assert.ok(response, `Unexpected request: ${url}`)
 			return { ok: true, json: async () => response }
 		},
-	})
+	} }, { ...clock, URL })
 	const store = loadModule('src/helpers/remotePlaylistStore.ts', {
 		'@/player/PlayerStore': { playListsStore: { getValue: () => playlists, setValue: (value) => { playlists = value } } },
 		'@/store/PersistStatus': { set: (key, value) => { assert.equal(key, 'music.playLists'); writes.push(value) } },
@@ -42,6 +41,133 @@ await check('references detect both platforms, disstid, hash URLs and reject mis
 	assert.equal(f.parseRemotePlaylistReference('https://music.163.com/playlist?id=42', 'QQ'), null)
 	assert.notEqual(f.remotePlaylistId(ref()), f.remotePlaylistId(ref('Netease')))
 })
+
+await check('share text parses the URL alone, not unrelated titles or numeric query parameters', () => {
+	const f = fixture()
+	assert.equal(f.parseRemotePlaylistReference('网易云用户分享 QQ 歌单 https://y.qq.com/n/ryqq/playlist/42。').remoteId, '42')
+	assert.equal(f.parseRemotePlaylistReference('https://y.qq.com/n/yqq/playlist/42.html').remoteId, '42')
+	for (const input of ['https://evil.example/?id=42', 'https://music.163.com.evil.example/playlist?id=42',
+		'https://evil.example/music.163.com/playlist?id=42', 'https://music.163.com/song?id=42',
+		'https://y.qq.com/n/ryqq/songDetail/42', 'https://y.qq.com:8443/playlist/42',
+		'https://user:pass@y.qq.com/playlist/42', 'https://music.163.com/playlist?id=42oops']) {
+		assert.equal(f.parseRemotePlaylistReference(input, 'QQ'), null, input)
+	}
+})
+
+const redirect = (location, status = 302) => () => ({ status, ok: false, headers: { get: (name) => name === 'location' ? location : null } })
+for (const [platform, short, target, page] of [
+	['QQ', 'https://c6.y.qq.com/base/fcgi-bin/u?__=sample', 'https://i.y.qq.com/n2/m/share/details/taoge.html?id=42', qqPage(['a'])],
+	['Netease', 'https://163cn.tv/sample', 'https://y.music.163.com/m/playlist?id=42', { code: 200, playlist: { trackIds: [{ id: 1 }], tracks: [netSong(1)] } }],
+]) {
+	await check(`${platform} share short URL resolves before importing and retains original source`, async () => {
+		const f = fixture([redirect(target), page])
+		// importPlayList.handlePreview performs this synchronous gate before the async helper.
+		const parsed = f.parseRemotePlaylistReference(`分享歌单 ${short}`, platform)
+		assert.ok(parsed)
+		assert.equal(parsed.platform, platform)
+		assert.equal(parsed.remoteId, undefined)
+		const result = await f.fetchRemotePlaylistFromInput(`分享歌单 ${short} （来自音乐）`, platform)
+		assert.equal(result.id, `remote:${platform}:42`)
+		assert.equal(result.remoteBinding.sourceUrl, short)
+		assert.equal(f.calls[0].options.redirect, 'manual')
+		assert.equal(f.clock.pending, 0)
+	})
+}
+
+await check('relative redirects resolve against the current official URL', async () => {
+	const f = fixture([redirect('/n/ryqq/playlist/42'), qqPage(['a'])])
+	assert.equal((await f.fetchRemotePlaylistFromInput('https://c6.y.qq.com/base/fcgi-bin/u?__=sample')).remoteBinding.remoteId, '42')
+})
+
+for (const target of ['https://evil.example/playlist?id=42', 'https://y.qq.com.evil.example/playlist/42',
+	'https://music.163.com/playlist?id=42', 'file:///playlist/42', 'https://user:pass@y.qq.com/playlist/42',
+	'https://y.qq.com/song?id=42']) {
+	await check(`unsafe or non-playlist short-link target is rejected: ${target}`, async () => {
+		const f = fixture([redirect(target)])
+		await assert.rejects(f.fetchRemotePlaylistFromInput('https://c6.y.qq.com/base/fcgi-bin/u?__=sample', 'QQ'))
+		assert.equal(f.calls.length, 1)
+		assert.equal(f.clock.pending, 0)
+	})
+}
+
+await check('short link mismatch makes no request, and loops, absent location, HTTP and automatic redirects fail closed', async () => {
+	const short = 'https://163cn.tv/sample'
+	const mismatch = fixture()
+	await assert.rejects(mismatch.fetchRemotePlaylistFromInput(short, 'QQ'))
+	assert.equal(mismatch.calls.length, 0)
+	for (const responses of [[redirect(null)],
+		[() => ({ status: 404, ok: false })], [() => ({ ok: true, redirected: true, url: 'https://evil.example/' })]]) {
+		const f = fixture(responses)
+		await assert.rejects(f.fetchRemotePlaylistFromInput(short))
+		assert.ok(f.calls.length <= 6)
+		assert.equal(f.clock.pending, 0)
+	}
+})
+
+await check('short links stop after five redirects even when every host is official', async () => {
+	const f = fixture(Array.from({ length: 6 }, (_, i) => redirect(`/base/fcgi-bin/u?__=hop${i}`)))
+	await assert.rejects(f.fetchRemotePlaylistFromInput('https://c6.y.qq.com/base/fcgi-bin/u?__=sample'), /超过 5 次/)
+	assert.equal(f.calls.length, 6)
+	assert.equal(f.clock.pending, 0)
+})
+
+await check('short-link request aborts on timeout', async () => {
+	const f = fixture([(_url, { signal }) => new Promise((_resolve, reject) => {
+		signal.addEventListener('abort', () => reject(new Error('aborted')))
+	})])
+	const pending = assert.rejects(f.fetchRemotePlaylistFromInput('https://163cn.tv/sample'), /aborted/)
+	f.clock.advance(20000)
+	await pending
+	assert.equal(f.clock.pending, 0)
+})
+
+await check('short-link redirects share a single timeout rather than resetting it per hop', async () => {
+	let f
+	f = fixture([() => {
+		f.clock.advance(10000)
+		return redirect('/next')()
+	}, (_url, { signal }) => new Promise((_resolve, reject) => {
+		signal.addEventListener('abort', () => reject(new Error('aborted')))
+	})])
+	const pending = assert.rejects(f.fetchRemotePlaylistFromInput('https://163cn.tv/sample'), /aborted/)
+	await flush()
+	assert.equal(f.calls.length, 2)
+	f.clock.advance(10000)
+	await pending
+	assert.equal(f.clock.pending, 0)
+})
+
+await check('Netease full trackIds prove completeness when trackCount is absent, including empty lists', async () => {
+	for (const ids of [[], [1, 2]]) {
+		const f = fixture([{ code: 200, playlist: { trackIds: ids.map((id) => ({ id })), tracks: [] } },
+			{ code: 200, songs: ids.map(netSong) }])
+		assert.deepEqual(plain((await f.fetchRemotePlaylist(ref('Netease'))).songs.map((item) => Number(item.id))), ids)
+	}
+})
+
+await check('QQ rejects a page whose declared offset or page size disagrees', async () => {
+	for (const extra of [{ song_begin: 1 }, { cur_song_num: 2 }]) {
+		const page = qqPage(['a'])
+		Object.assign(page.cdlist[0], extra)
+		const f = fixture([page])
+		await assert.rejects(f.fetchRemotePlaylist(ref()))
+	}
+})
+
+for (const [name, playlist] of [
+	['real 1501-count / 1500-ID truncation', { trackCount: 1501, trackIds: Array.from({ length: 1500 }, (_, i) => ({ id: i + 1 })), tracks: [] }],
+	['countless duplicate IDs', { trackIds: [{ id: 1 }, { id: 1 }], tracks: [netSong(1)] }],
+	['countless invalid IDs', { trackIds: [{ id: 'bad' }], tracks: [] }],
+	['null total', { trackCount: null, trackIds: [], tracks: [] }],
+]) {
+	await check(`Netease ${name} preserves the original stored playlist`, async () => {
+		const original = { id: 'remote:Netease:42', platform: 'Netease', songs: [song('old')], remoteBinding: ref('Netease') }
+		const f = fixture([{ code: 200, playlist }], [original])
+		await assert.rejects(f.refreshRemotePlaylist(original.id))
+		assert.equal(f.writes.length, 0)
+		assert.equal(f.playlists[0], original)
+	})
+}
 
 await check('QQ consumes all pages using the actual offset and both song formats', async () => {
 	const f = fixture([qqPage(['a', 'b'], 3), { code: 0, cdlist: [{ songnum: 3, songlist: [{ songmid: 'c', songname: 'old', albumname: 'album', interval: 15 }] }] }])

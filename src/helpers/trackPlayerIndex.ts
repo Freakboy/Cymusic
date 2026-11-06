@@ -33,6 +33,11 @@ import { createMediaIndexMap } from '@/utils/mediaIndexMap'
 import { Alert, AppState, Image } from 'react-native'
 
 import { myGetLyric } from '@/helpers/userApi/getMusicSource'
+import { fetchSourceLyric, mergeSourceLyric, normalizeSourceLyric } from './sourceLyric'
+import type { SourceLyric } from './sourceLyric'
+import type { SourceMusicApi } from './userApi/importMusicSource'
+import { resolveQQMid } from '@/player/sourceResolver/qqMatch'
+import { sourceId } from '@/player/sourceIdentity'
 
 import { fakeAudioMp3Uri } from '@/constants/images'
 import { nowLanguage } from '@/utils/i18n'
@@ -197,11 +202,46 @@ function reconcileStreamPriority() {
 }
 
 function fetchCurrentLyrics(track: IMusic.IMusicItem, token: string) {
-	void myGetLyric(track).then((lyc) => {
-		if (isCurrentMusic(track) && nativeQueue?.token === token && trackSourceLoadingStore.getValue() === null) {
-			nowLyricState.setValue(lyc.lyric)
-			nowTranslationLyricState.setValue(lyc.tlyric || null)
+	// Playback clears its loading flag in finally after scheduling this request.
+	void Promise.resolve().then(async () => {
+		const source = musicApiSelectedStore.getValue() as SourceMusicApi | null
+		const identity = sourceId(source)
+		const revision = sourceRevision
+		const isCurrent = () => isCurrentMusic(track) && nativeQueue?.token === token &&
+			trackSourceLoadingStore.getValue() === null && sourceRevision === revision &&
+			sourceId(musicApiSelectedStore.getValue()) === identity
+		if (!isCurrent()) return
+		let sourceLyrics: SourceLyric | null = null
+		if (source?.enabled !== false && typeof source?.getLyric === 'function') {
+			try {
+				const songmid = await resolveQQMid(track)
+				if (!isCurrent()) return
+				sourceLyrics = await fetchSourceLyric({ ...track, songmid }, isCurrent)
+			} catch (error) {
+				logError('获取音源歌词失败:', error)
+			}
 		}
+		if (!isCurrent()) return
+		if (sourceLyrics) {
+			nowLyricState.setValue(sourceLyrics.lyric || null)
+			if (!isCurrent()) return
+			nowTranslationLyricState.setValue(sourceLyrics.tlyric || null)
+			if (sourceLyrics.lyric && sourceLyrics.tlyric) return
+		}
+		if (!isCurrent()) return
+		let platformLyrics: SourceLyric | null = null
+		if (!sourceLyrics?.lyric || !sourceLyrics.tlyric) {
+			try {
+				platformLyrics = normalizeSourceLyric(await myGetLyric(track))
+			} catch (error) {
+				logError('获取平台歌词失败:', error)
+			}
+		}
+		if (!isCurrent()) return
+		const lyc = mergeSourceLyric(sourceLyrics, platformLyrics)
+		if (!lyc) return
+		nowLyricState.setValue(lyc.lyric || null)
+		if (isCurrent()) nowTranslationLyricState.setValue(lyc.tlyric || null)
 	}).catch((error) => logError('获取歌词失败:', error))
 }
 
@@ -981,6 +1021,8 @@ const reloadMusicApi = (musicApi: IMusic.MusicApi, isTest: boolean = false): Pro
 		return {
 			...musicApi,
 			getMusicUrl: context.module.exports.getMusicUrl || musicApi.getMusicUrl,
+			getLyric: typeof context.module.exports.getLyric === 'function' ? context.module.exports.getLyric : undefined,
+			sources: context.module.exports.sources,
 		}
 	} catch (error) {
 		logError(`Error reloading script for API "${musicApi.name}":`, error)

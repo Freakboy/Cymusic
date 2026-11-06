@@ -2,6 +2,7 @@ import { ThemeColors } from '@/constants/tokens'
 import myTrackPlayer from '@/helpers/trackPlayerIndex'
 import {
 	assertSourceIdle,
+	describeSourceChannels,
 	fetchManagedSourceScript,
 	importManagedSource,
 	saveSourceList,
@@ -98,6 +99,8 @@ export default function SourceManagementScreen() {
 			</View>
 			<ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}>
 				<Text style={styles.description}>{text.resolver}</Text>
+				<Text style={styles.description}>{text.channelScope}</Text>
+				<Text style={styles.description}>{text.testScope}</Text>
 				<View style={styles.card}>
 					<Text style={styles.description}>{text.trust}</Text>
 					<TextInput
@@ -143,6 +146,15 @@ export default function SourceManagementScreen() {
 								.filter(Boolean)
 								.join(' / ')}
 						</Text>
+						<Text style={styles.description}>{text.channels}</Text>
+						{describeSourceChannels(selected?.id === source.id ? selected : source).map(
+							(channel) => (
+								<Text key={channel.id} style={styles.description}>
+									{{ tx: text.channelTx, wy: text.channelWy, kg: text.channelKg, kw: text.channelKw, mg: text.channelMg }[channel.id]}: {text[channel.state]}
+									{channel.qualitys.length ? ` (${channel.qualitys.join(' / ')})` : ''}
+								</Text>
+							),
+						)}
 						<View style={styles.header}>
 							<Text style={styles.description}>{text.enabled}</Text>
 							<Switch
@@ -197,7 +209,7 @@ export default function SourceManagementScreen() {
 										} catch (cause) {
 											setStatus((previous) => ({
 												...previous,
-												[source.id]: cause instanceof Error ? cause.message : String(cause),
+												[source.id]: `tx: ${cause instanceof Error ? cause.message : String(cause)}`,
 											}))
 										}
 									})

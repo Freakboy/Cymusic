@@ -66,7 +66,8 @@ CyMusic 将音乐浏览、播放、歌词和个人歌单放在一起，支持深
 
 本次还加入 iOS CarPlay 浏览/选曲桥接与可选蓝牙歌词兼容模式，需重新构建原生 App。
 CarPlay 需要相应签名权限；当前 Linux 环境尚未完成 Swift 编译与车机验收。
-蓝牙歌词默认关闭，开启后将当前歌词附加到系统歌曲标题，会影响锁屏和 CarPlay 显示。
+蓝牙歌词默认关闭，开启后系统标题仅显示当前歌词，不再重复歌名；没有歌词或关闭后恢复歌名。
+该设置会影响锁屏和 CarPlay 显示。
 实现及验证边界见[功能验证记录](docs/maintenance/2026-11-05-ios-features.md)。Android / Android Auto 暂缓。
 
 部分 FLAC 在快进后可能出现音频与歌词不同步，可在 **设置 → 音频设置 → 精确跳转**
@@ -80,7 +81,7 @@ CarPlay 需要相应签名权限；当前 Linux 环境尚未完成 Swift 编译�
 | 渠道 | 用途 |
 | --- | --- |
 | [GitHub Releases](https://github.com/gyc-12/Cymusic/releases) | 获取已发布版本与对应说明。 |
-| [main 分支构建](https://github.com/gyc-12/Cymusic/actions/workflows/build-ios.yml?query=branch%3Amain) | 获取当前源码的 IPA；打开最近一次成功运行，在 **Artifacts** 下载 `CyMusic-unsigned-ipa`。 |
+| [main 分支构建](https://github.com/Freakboy/Cymusic/actions/workflows/build-ios.yml?query=branch%3Amain) | 获取当前源码的 IPA；打开最近一次成功运行，在 **Artifacts** 下载带版本与构建号的产物，例如 `CyMusic-1.2.1-build2-unsigned`。 |
 
 本 README 介绍 `main` 分支。Releases 与 `main` 可能处于不同版本；如需 Expo 57 / RNTP v5 版本，请选择对应的 `main` 构建。
 Actions 产物是**未签名 IPA**，安装到真机前需要自己的有效签名和 App Group 配置。

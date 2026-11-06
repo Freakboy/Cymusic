@@ -1,5 +1,5 @@
-const timeReg = /\[[\d:.]+\]/g
-const metaReg = /\[(.+):(.+)\]/g
+const timeReg = /\[\d+(?::\d+)+(?:\.\d+)?\]/g
+const metaReg = /\[([a-zA-Z][\w-]*):([^\]\r\n]*)\]/g
 
 /** 额外的配置 */
 interface IExtra {
@@ -34,39 +34,23 @@ export default class LyricParser {
 		}
 		raw = raw.trim()
 		const rawLrcItems: Array<ILyric.IParsedLrcItem> = []
-		const rawLrcs = raw.split(timeReg) ?? []
-		const rawTimes = raw.match(timeReg) ?? []
-		const len = rawTimes.length
+		const meta = this.parseMeta(raw)
+		// LRC offset advances lyrics; extra.offset is the user's positive delay.
+		// Expose the effective delay in seconds for both lookup and tap-to-seek.
+		meta.offset = (extra?.offset ?? 0) - (meta.offset ?? 0)
 
-		const meta = this.parseMeta(rawLrcs[0].trim())
-		if (extra?.offset) {
-			meta.offset = (meta.offset ?? 0) + extra.offset
-		}
-		rawLrcs.shift()
-
-		let counter = 0
-		let j, lrc
-		for (let i = 0; i < len; ++i) {
-			counter = 0
-			while (rawLrcs[0] === '') {
-				++counter
-				rawLrcs.shift()
+		for (const line of raw.split(/\r?\n/)) {
+			const content = line.replace(metaReg, '')
+			const times = content.match(timeReg) ?? []
+			const parts = content.split(timeReg)
+			let start = 0
+			for (let i = 0; i < times.length; ++i) {
+				const lrc = parts[i + 1].trim()
+				if (!lrc && i < times.length - 1) continue
+				for (; start <= i; ++start) {
+					rawLrcItems.push({ time: this.parseTime(times[start]), lrc })
+				}
 			}
-			lrc = rawLrcs[0]?.trim?.() ?? ''
-			for (j = i; j < i + counter; ++j) {
-				rawLrcItems.push({
-					time: this.parseTime(rawTimes[j]),
-					lrc,
-				})
-			}
-			i += counter
-			if (i < len) {
-				rawLrcItems.push({
-					time: this.parseTime(rawTimes[i]),
-					lrc,
-				})
-			}
-			rawLrcs.shift()
 		}
 		let lrcItems = rawLrcItems.sort((a, b) => a.time - b.time)
 		if (lrcItems.length === 0 && raw.length) {
@@ -161,7 +145,7 @@ export default class LyricParser {
 			k = m.substring(1, m.indexOf(':'))
 			v = m.substring(k.length + 2, m.length - 1)
 			if (k === 'offset') {
-				meta[k] = +v / 1000
+				if (Number.isFinite(+v)) meta[k] = +v / 1000
 			} else {
 				meta[k] = v
 			}
