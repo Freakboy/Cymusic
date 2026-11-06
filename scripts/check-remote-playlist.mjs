@@ -42,6 +42,25 @@ await check('references detect both platforms, disstid, hash URLs and reject mis
 	assert.notEqual(f.remotePlaylistId(ref()), f.remotePlaylistId(ref('Netease')))
 })
 
+await check('QQ iOS forwarding retains the original id-parameter import contract', async () => {
+	for (const link of [
+		'https://i.y.qq.com/n2/m/share/details/taoge.html?platform=11&appshare=iphone&appversion=130000&id=42&ADTAG=qqmusic',
+		'https://i.y.qq.com/n2/m/share/taoge.html?appshare=iphone&id=42',
+		'https://y.qq.com/n/ryqq/playsquare/42',
+		'https://y.qq.com/n/yqq/playsquare/42.html',
+		'https://i.y.qq.com/?appshare=iphone&id=42',
+	]) {
+		const f = fixture([qqPage(['a'])])
+		assert.equal(f.parseRemotePlaylistReference(`我分享了一个歌单：${link}`)?.remoteId, '42', link)
+		const result = await f.fetchRemotePlaylistFromInput(link)
+		assert.equal(result.remoteBinding.remoteId, '42')
+		assert.equal(result.songs.length, 1)
+	}
+	for (const path of ['song', 'songDetail', 'album', 'singer', 'artist']) {
+		assert.equal(fixture().parseRemotePlaylistReference(`https://y.qq.com/n/ryqq/${path}?id=42`), null)
+	}
+})
+
 await check('share text parses the URL alone, not unrelated titles or numeric query parameters', () => {
 	const f = fixture()
 	assert.equal(f.parseRemotePlaylistReference('网易云用户分享 QQ 歌单 https://y.qq.com/n/ryqq/playlist/42。').remoteId, '42')
@@ -55,6 +74,30 @@ await check('share text parses the URL alone, not unrelated titles or numeric qu
 })
 
 const redirect = (location, status = 302) => () => ({ status, ok: false, headers: { get: (name) => name === 'location' ? location : null } })
+await check('Netease mobile Chinese share text imports without manually deleting titles or wrappers', async () => {
+	for (const input of [
+		'分享歌单《夜晚听的歌》 https://music.163.com/playlist?id=42 （来自@网易云音乐）',
+		'分享我的歌单：\nhttps://music.163.com/#/playlist?id=42\n来自网易云音乐',
+		'分享歌单「我的收藏」：“https://music.163.com/playlist?id=42”',
+		'分享歌单『我的收藏』：「https://y.music.163.com/m/playlist?id=42」',
+	]) {
+		const f = fixture([{ code: 200, playlist: { trackCount: 1, tracks: [netSong(1)] } }])
+		assert.equal(f.parseRemotePlaylistReference(input)?.remoteId, '42', input)
+		assert.equal((await f.fetchRemotePlaylistFromInput(input)).remoteBinding.remoteId, '42')
+	}
+	for (const input of [
+		'分享歌单《中文歌单》https://163cn.tv/sample（来自@网易云音乐）',
+		'分享歌单“中文歌单”：\n“https://163cn.tv/sample”',
+	]) {
+		const f = fixture([redirect('https://y.music.163.com/m/playlist?id=42'),
+			{ code: 200, playlist: { trackCount: 1, tracks: [netSong(1)] } }])
+		assert.ok(f.parseRemotePlaylistReference(input), input)
+		const result = await f.fetchRemotePlaylistFromInput(input)
+		assert.equal(result.remoteBinding.platform, 'Netease')
+		assert.equal(result.remoteBinding.remoteId, '42')
+		assert.equal(f.calls[0].url, 'https://163cn.tv/sample')
+	}
+})
 for (const [platform, short, target, page] of [
 	['QQ', 'https://c6.y.qq.com/base/fcgi-bin/u?__=sample', 'https://i.y.qq.com/n2/m/share/details/taoge.html?id=42', qqPage(['a'])],
 	['Netease', 'https://163cn.tv/sample', 'https://y.music.163.com/m/playlist?id=42', { code: 200, playlist: { trackIds: [{ id: 1 }], tracks: [netSong(1)] } }],

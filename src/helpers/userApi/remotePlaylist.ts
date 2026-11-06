@@ -29,8 +29,12 @@ export function parseRemotePlaylistReference(input: string, preferredPlatform?: 
 	if (link.short) return { platform, sourceUrl: url.href, remoteId: undefined }
 	const path = url.hash.startsWith('#/') ? url.hash.slice(1) : `${url.pathname}${url.search}`
 	const page = new URL(path, url.origin)
+	const nonPlaylist = /\/(?:song|songdetail|album|albumdetail|singer|artist)(?:\/|\.|$)/i.test(page.pathname)
 	const remoteId = page.pathname.match(/^\/(?:n\/(?:ryqq|yqq)\/)?playlist\/(\d+)(?:\.html)?\/?$/i)?.[1]
+		?? (platform === 'QQ' ? page.pathname.match(/^\/n\/(?:ryqq|yqq)\/playsquare\/(\d+)(?:\.html)?\/?$/i)?.[1] : null)
 		?? (platform === 'QQ' ? page.searchParams.get('disstid') : null)
+		// Shipped QQ imports accepted an id parameter without depending on the share-page path.
+		?? (platform === 'QQ' && !nonPlaylist ? page.searchParams.get('id') : null)
 		?? (/^\/(?:m\/)?playlist\/?$/i.test(page.pathname)
 			|| (platform === 'QQ' && /\/share\/details\/taoge\.html$/i.test(page.pathname)) ? page.searchParams.get('id') : null)
 	if (!remoteId || !/^\d+$/.test(remoteId)) return null
@@ -38,7 +42,7 @@ export function parseRemotePlaylistReference(input: string, preferredPlatform?: 
 }
 
 function playlistLink(input: string) {
-	const value = input.match(/https?:\/\/[^\s<>"'`，。；！？（）【】《》]+/i)?.[0].replace(/[)\].,;!]+$/, '')
+	const value = input.match(/https?:\/\/[^\s<>"'`，。；！？（）【】《》“”‘’「」『』]+/i)?.[0].replace(/[)\].,;!]+$/, '')
 	if (!value) return null
 	try {
 		const url = new URL(value.replace(/&amp;/g, '&'))

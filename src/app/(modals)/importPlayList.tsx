@@ -105,7 +105,10 @@ const ImportPlayList = () => {
 			const response = await fetchRemotePlaylistFromInput(playlistUrl, platform)
 			if (current === requestId.current) setPreview(response)
 		} catch (err) {
-			if (current === requestId.current) setError(text.importFailed)
+			if (current === requestId.current) {
+				const detail = err instanceof Error ? err.message : ''
+				setError(detail ? `${text.importFailed}\n${detail}` : text.importFailed)
+			}
 			logError('Playlist preview:', err)
 		} finally {
 			if (current === requestId.current) {
