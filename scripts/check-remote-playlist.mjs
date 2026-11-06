@@ -43,6 +43,7 @@ await check('references detect both platforms, disstid, hash URLs and reject mis
 })
 
 await check('QQ iOS forwarding retains the original id-parameter import contract', async () => {
+	assert.equal(fixture().parseRemotePlaylistReference('https://i2.y.qq.com/n3/other/pages/details/playlist.html?qq_aio_chat_type=2&source=qq&ADTAG=qfshare&id=9791950324&appshare=iphone&hosteuin=sample&appversion=200405')?.remoteId, '9791950324')
 	for (const link of [
 		'https://i.y.qq.com/n2/m/share/details/taoge.html?platform=11&appshare=iphone&appversion=130000&id=42&ADTAG=qqmusic',
 		'https://i.y.qq.com/n2/m/share/taoge.html?appshare=iphone&id=42',
@@ -220,6 +221,88 @@ await check('QQ consumes all pages using the actual offset and both song formats
 	assert.equal(result.songs[2].album, 'album')
 	assert.equal(result.id, 'remote:QQ:42')
 	assert.equal(f.clock.pending, 0)
+})
+
+const inventoryPage = (ids, offset, consumed, details) => ({ code: 0, cdlist: [{
+	disstid: '42', songnum: ids.length, total_song_num: ids.length, songids: ids.join(','),
+	song_begin: offset, cur_song_num: consumed,
+	songlist: details.map(id => ({ id: Number(id), mid: `mid${id}`, title: `song ${id}` })),
+}] })
+
+await check('QQ slot pagination preserves all 335 inventory IDs including an explicit unavailable detail', async () => {
+	const ids = Array.from({ length: 335 }, (_, i) => String(i + 1))
+	const f = fixture([0, 100, 200, 300].map(offset => inventoryPage(ids, offset, Math.min(100, ids.length - offset),
+		ids.slice(offset, offset + 100).filter(id => id !== '261').reverse())))
+	const result = await f.fetchRemotePlaylist(ref())
+	assert.equal(result.songs.length, 335)
+	assert.equal(new Set(result.songs.map(item => item.id)).size, 335)
+	assert.deepEqual(plain(result.songs.map(item => item.id)), ids.map(id => id === '261' ? 'unavailable:261' : `mid${id}`))
+	assert.deepEqual(plain(result.qqCompleteness), { total: 335, available: 334, unavailableSongIds: ['261'] })
+	assert.match(result.songs[260].title, /不可用.*261/)
+	assert.equal(result.songs[260].songmid, undefined)
+	assert.equal(result.songs[260].url, 'Unknown')
+	assert.match(f.calls[3].url, /song_begin=300&/)
+	assert.equal(result.remoteBinding.remoteSongKeys.length, 335)
+})
+
+await check('QQ v8 fallback is limited to initial API rejection and retains the same ID and completeness checks', async () => {
+	const page = inventoryPage(['1', '2'], 0, 2, ['1', '2'])
+	const f = fixture([{ code: 100 }, { code: 0, data: { cdlist: page.cdlist } }])
+	const result = await f.fetchRemotePlaylist(ref())
+	assert.match(f.calls[1].url, /\/v8\/fcg-bin\/fcg_v8_playlist_cp.fcg\?newsong=1&id=42&/)
+	assert.equal(result.songs.length, 2)
+	assert.deepEqual(plain(result.qqCompleteness), { total: 2, available: 2, unavailableSongIds: [] })
+	const g = fixture([inventoryPage(['1', '2'], 0, 1, ['1']), { code: 100 }])
+	await assert.rejects(g.fetchRemotePlaylist(ref()), /接口错误/)
+	assert.equal(g.calls.length, 2)
+})
+
+await check('QQ rejected primary plus truncated v8 response cannot write over stored songs', async () => {
+	const original = { id: '42', platform: 'QQ', songs: [song('old')] }
+	const f = fixture([{ code: 100 }, qqPage(['a'], 2), qqPage([], 2)], [original])
+	await assert.rejects(f.refreshRemotePlaylist('42'), /分页不完整/)
+	assert.equal(f.writes.length, 0)
+	assert.equal(f.playlists[0], original)
+	assert.match(f.calls[2].url, /\/v8\/.*song_begin=1&/)
+})
+
+for (const [name, change] of [
+	['truncated inventory', p => { p.songids = '1' }],
+	['duplicate inventory', p => { p.songids = '1,1' }],
+	['wrong playlist', p => { p.disstid = '43' }],
+	['conflicting counts', p => { p.songnum = 3 }],
+	['duplicate detail IDs', p => { p.songlist[1] = p.songlist[0] }],
+	['duplicate mids', p => { p.songlist[1].mid = p.songlist[0].mid }],
+	['foreign detail ID', p => { p.songlist[0].id = 3 }],
+	['missing mid', p => { delete p.songlist[0].mid }],
+	['wrong offset', p => { p.song_begin = 1 }],
+	['oversized page', p => { p.cur_song_num = 3 }],
+]) {
+	await check(`QQ inventory ${name} cannot overwrite stored songs`, async () => {
+		const page = inventoryPage(['1', '2'], 0, 2, ['1', '2'])
+		change(page.cdlist[0])
+		const original = { id: '42', platform: 'QQ', songs: [song('old')] }
+		const f = fixture([page], [original])
+		await assert.rejects(f.refreshRemotePlaylist('42'))
+		assert.equal(f.writes.length, 0)
+		assert.equal(f.playlists[0], original)
+	})
+}
+
+await check('QQ rejects inventory changes even when total is unchanged', async () => {
+	const f = fixture([inventoryPage(['1', '2'], 0, 1, ['1']), inventoryPage(['1', '3'], 1, 1, ['3'])])
+	await assert.rejects(f.fetchRemotePlaylist(ref()), /发生变化/)
+})
+
+await check('QQ inventory cannot disappear between pages or advance without consuming slots', async () => {
+	for (const next of [
+		{ ...inventoryPage(['1', '2'], 1, 1, ['2']).cdlist[0], songids: undefined },
+		inventoryPage(['1', '2'], 1, 0, []).cdlist[0],
+	]) {
+		const f = fixture([inventoryPage(['1', '2'], 0, 1, ['1']), { code: 0, cdlist: [next] }])
+		await assert.rejects(f.fetchRemotePlaylist(ref()))
+		assert.equal(f.clock.pending, 0)
+	}
 })
 
 for (const [name, pages] of [

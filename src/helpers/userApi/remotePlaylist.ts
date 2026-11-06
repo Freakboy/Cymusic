@@ -11,6 +11,7 @@ export type RemotePlaylistReference = {
 export type RemotePlaylistResult = IMusic.PlayList & {
 	success: true
 	remoteBinding: NonNullable<IMusic.PlayList['remoteBinding']>
+	qqCompleteness?: { total: number; available: number; unavailableSongIds: string[] }
 }
 
 export function remotePlaylistId(reference: Pick<RemotePlaylistReference, 'platform' | 'remoteId'>) {
@@ -172,22 +173,70 @@ async function fetchQQPlaylist(reference: RemotePlaylistReference) {
 	const seen = new Set<string>()
 	let metadata: any
 	let total: number
+	let offset = 0
+	let inventory: string[] | undefined
+	let legacy = false
+	const unavailableSongIds: string[] = []
 	do {
-		const data = await requestJson(`https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&json=1&utf8=1&onlysong=0&new_format=1&disstid=${encodeURIComponent(reference.remoteId)}&format=json&song_begin=${songs.length}&song_num=100`, {
+		const headers = {
 			Referer: 'https://y.qq.com/', Origin: 'https://y.qq.com',
-		})
+		}
+		const requestPage = () => requestJson(`https://c.y.qq.com/${legacy
+			? `v8/fcg-bin/fcg_v8_playlist_cp.fcg?newsong=1&id=${encodeURIComponent(reference.remoteId)}&inCharset=GB2312&outCharset=utf-8`
+			: `qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&json=1&utf8=1&onlysong=0&new_format=1&disstid=${encodeURIComponent(reference.remoteId)}`}&format=json&song_begin=${offset}&song_num=100`, headers)
+		let data
+		try {
+			data = await requestPage()
+		} catch (error) {
+			if (offset !== 0 || legacy || !(error instanceof Error) || !/^歌单接口错误 \(/.test(error.message)) throw error
+			legacy = true
+			data = await requestPage()
+		}
 		const page = (data?.data?.cdlist ?? data?.cdlist)?.[0]
 		if (!page || !Array.isArray(page.songlist)) throw new Error('QQ 歌单分页缺失')
-		if ((page.song_begin != null && count(page.song_begin) !== songs.length)
-			|| (page.cur_song_num != null && count(page.cur_song_num) !== page.songlist.length)) {
-			throw new Error('QQ 歌单分页位置或数量不一致，未更新本地数据')
-		}
 		const pageTotal = count(page.total_song_num ?? page.songnum)
 		if (metadata && total !== pageTotal) throw new Error('QQ 歌单在分页期间发生变化，请重试')
+		if (page.disstid != null && String(page.disstid) !== reference.remoteId) throw new Error('QQ 歌单 ID 不一致')
+		if (page.songnum != null && count(page.songnum) !== pageTotal) throw new Error('QQ 歌单总数不一致')
+		if (page.songids != null) {
+			const ids = typeof page.songids === 'string' && page.songids === '' ? [] : String(page.songids).split(',')
+			if (ids.length !== pageTotal || ids.some(id => !/^\d+$/.test(id)) || new Set(ids).size !== pageTotal) {
+				throw new Error('QQ 歌曲 ID 列表不完整，未更新本地数据')
+			}
+			if (metadata && ids.join(',') !== inventory?.join(',')) throw new Error('QQ 歌单在分页期间发生变化，请重试')
+			inventory = ids
+		} else if (inventory) throw new Error('QQ 歌曲 ID 列表缺失')
+		const consumed = page.cur_song_num == null ? page.songlist.length : count(page.cur_song_num)
+		if ((page.song_begin != null && count(page.song_begin) !== offset)
+			|| consumed > 100 || offset + consumed > pageTotal || page.songlist.length > consumed
+			|| (!inventory && consumed !== page.songlist.length)) {
+			throw new Error('QQ 歌单分页位置或数量不一致，未更新本地数据')
+		}
 		metadata = metadata ?? page
 		total = pageTotal
-		if (!page.songlist.length && songs.length < total) throw new Error('QQ 歌单分页不完整')
-		for (const raw of page.songlist) {
+		if (!consumed && offset < total) throw new Error('QQ 歌单分页不完整')
+		let ordered = page.songlist
+		if (inventory) {
+			// cur_song_num counts playlist slots, including IDs whose details QQ omits.
+			const ids = inventory.slice(offset, offset + consumed)
+			const byId = new Map<string, any>()
+			for (const raw of page.songlist) {
+				const item = raw.musicData ?? raw
+				const id = String(item.id ?? item.songid ?? '')
+				if (!ids.includes(id) || byId.has(id) || !(item.mid ?? item.songmid) || !(item.title ?? item.songname)) {
+					throw new Error('QQ 歌曲详情 ID 或内容不一致')
+				}
+				byId.set(id, raw)
+			}
+			ordered = ids.map(id => byId.get(id) ?? { unavailableId: id })
+		}
+		for (const raw of ordered) {
+			if (raw.unavailableId) {
+				unavailableSongIds.push(raw.unavailableId)
+				songs.push({ id: `unavailable:${raw.unavailableId}`, platform: 'QQ', title: `不可用歌曲 (QQ ID: ${raw.unavailableId})`,
+					artist: '详情不可用', album: '', artwork: '', duration: 0, url: 'Unknown' })
+				continue
+			}
 			const item = raw.musicData ?? raw
 			const id = item.mid ?? item.songmid
 			if (!id || seen.has(String(id))) throw new Error('QQ 歌单分页重复或歌曲 ID 缺失')
@@ -195,6 +244,8 @@ async function fetchQQPlaylist(reference: RemotePlaylistReference) {
 			const albumMid = item.album?.mid ?? item.albummid
 			songs.push({
 				id: String(id), songmid: String(id), platform: 'QQ', title: item.title ?? item.songname ?? '未知歌曲',
+				songId: item.id ?? item.songid,
+				strMediaMid: item.file?.media_mid,
 				artist: (item.singer ?? []).map((singer: any) => singer.name).filter(Boolean).join('、') || '未知歌手',
 				album: item.album?.name ?? item.albumname ?? '未知专辑', albummid: albumMid,
 				artwork: albumMid ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${albumMid}.jpg` : '',
@@ -202,10 +253,12 @@ async function fetchQQPlaylist(reference: RemotePlaylistReference) {
 			})
 		}
 		if (songs.length > total) throw new Error('QQ 歌单总数不一致')
-	} while (songs.length < total)
+		offset += consumed
+	} while (offset < total)
 	return {
 		artist: metadata.nickname || 'QQ音乐', name: metadata.dissname || '未命名歌单',
 		artwork: (metadata.logo || '').replace(/^http:/, 'https:'), description: metadata.desc || '', songs,
+		qqCompleteness: { total, available: songs.length - unavailableSongIds.length, unavailableSongIds },
 	}
 }
 

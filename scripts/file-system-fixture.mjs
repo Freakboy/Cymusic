@@ -460,7 +460,7 @@ export function createFixture() {
 					: specifier
 				if (Object.hasOwn(overrides, key)) return overrides[key]
 				if (absolute) return load(absolute)
-				if (specifier === 'immer' || specifier === 'lodash.shuffle' || specifier === 'crypto-js/sha256')
+				if (specifier === 'immer' || specifier === 'lodash.shuffle' || specifier === 'crypto-js/sha256' || specifier === 'crypto-js')
 					return projectRequire(specifier)
 				throw new Error(`Unexpected import ${specifier} from ${relativeFile}`)
 			}

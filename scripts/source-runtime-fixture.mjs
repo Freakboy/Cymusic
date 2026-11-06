@@ -135,7 +135,7 @@ export function createSourceFixture({ fetch: fetchImpl = globalThis.fetch, impor
 	const adapter = load('src/helpers/userApi/lxMusicSourceAdapter')
 	const initialized = async name => {
 		const ready = adapter.adaptLxMusicScript(script(name))
-		native.init()
+		native.init(undefined, { info: { sources: { tx: { type: 'music', actions: ['musicUrl'], qualitys: ['128k', '320k', 'flac'] } } } })
 		return ready
 	}
 	return { clock, native, logs, load, facade, adapter, initialized }

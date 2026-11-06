@@ -163,15 +163,34 @@ globalThis.lx_setup = (key, id, name, description, version, author, homepage, ra
   const supportActions = {
     kw: ['musicUrl'],
     kg: ['musicUrl'],
-    tx: ['musicUrl'],
+    tx: ['musicUrl', 'lyric'],
     wy: ['musicUrl'],
     mg: ['musicUrl'],
     xm: ['musicUrl'],
     local: ['musicUrl', 'lyric', 'pic'],
   }
 
+  const verifyMusicUrlInfo = (response) => {
+    const info = typeof response === 'string' ? { url: response } : response
+    if (!info || typeof info.url !== 'string' || info.url.length > 2048 || !/^https?:\/\/\S+$/i.test(info.url)) throw new Error('Invalid musicUrl')
+    const result = { url: info.url }
+    if (info.headers != null) {
+      if (typeof info.headers !== 'object' || Array.isArray(info.headers) || Object.keys(info.headers).length > 32) throw new Error('Invalid headers')
+      result.headers = {}
+      for (const key of Object.keys(info.headers)) {
+        const value = info.headers[key]
+        if (!/^[a-z\d!#$%&'*+.^_`|~-]{1,128}$/i.test(key) || typeof value !== 'string' || value.length > 4096 || /[\r\n]/.test(value)) throw new Error('Invalid header')
+        Object.defineProperty(result.headers, key, { value, enumerable: true })
+      }
+    }
+    if (info.userAgent != null) {
+      if (typeof info.userAgent !== 'string' || info.userAgent.length > 1024 || /[\r\n]/.test(info.userAgent)) throw new Error('Invalid userAgent')
+      result.userAgent = info.userAgent
+    }
+    return result
+  }
   const verifyLyricInfo = (info) => {
-    if (typeof info != 'object' || typeof info.lyric != 'string') throw new Error('failed')
+    if (!info || typeof info != 'object' || typeof info.lyric != 'string') throw new Error('failed')
     if (info.lyric.length > 51200) throw new Error('failed')
     return {
       lyric: info.lyric,
@@ -184,9 +203,21 @@ globalThis.lx_setup = (key, id, name, description, version, author, homepage, ra
   const requestQueue = new Map()
   let isInitedApi = false
   let isShowedUpdateAlert = false
+  // Keep HTTP ownership on the wire correlation key, never the reusable business key.
+  const requestContextStack = []
+  const pushRequestContext = (context) => {
+    if (!context || typeof context != 'object') return
+    requestContextStack.push(context)
+  }
+  const popRequestContext = (context) => {
+    const index = requestContextStack.lastIndexOf(context)
+    if (index >= 0) requestContextStack.splice(index, 1)
+  }
+  const getCurrentRequestContext = () => requestContextStack[requestContextStack.length - 1] || null
 
   const sendNativeRequest = (url, options, callback) => {
     const requestKey = Math.random().toString()
+    const currentRequestContext = getCurrentRequestContext()
     const requestInfo = {
       aborted: false,
       abort: () => {
@@ -203,7 +234,17 @@ globalThis.lx_setup = (key, id, name, description, version, author, homepage, ra
       requestInfo,
     })
 
-    nativeCall(NATIVE_EVENTS_NAMES.request, { requestKey, url, options })
+    nativeCall(NATIVE_EVENTS_NAMES.request, {
+      requestKey,
+      url,
+      options,
+      parentRequestKey: currentRequestContext && typeof currentRequestContext.requestKey == 'string'
+        ? currentRequestContext.requestKey
+        : undefined,
+      requestType: currentRequestContext && typeof currentRequestContext.requestType == 'string'
+        ? currentRequestContext.requestType
+        : undefined,
+    })
     return requestInfo
   }
   const handleNativeResponse = ({ requestKey, error, response }) => {
@@ -217,20 +258,27 @@ globalThis.lx_setup = (key, id, name, description, version, author, homepage, ra
   }
 
   const handleRequest = ({ requestKey, data }) => {
+    if (!data || !allSources.includes(data.source) || !supportActions[data.source].includes(data.action) || !data.info || typeof data.info !== 'object') return nativeCall(NATIVE_EVENTS_NAMES.response, { requestKey, status: false, errorMessage: 'Invalid music request' })
     // console.log(data)
     if (!events.request) return nativeCall(NATIVE_EVENTS_NAMES.response, { requestKey, status: false, errorMessage: 'Request event is not defined' })
+    const requestType = data.info.requestContext && typeof data.info.requestContext.requestType == 'string'
+      ? data.info.requestContext.requestType
+      : 'current'
+    const requestContext = typeof requestKey == 'string' ? { requestKey, requestType } : null
+    const requestInfo = { ...data.info }
+    delete requestInfo.requestContext
+    if (requestContext) pushRequestContext(requestContext)
     try {
-      events.request.call(globalThis.lx, { source: data.source, action: data.action, info: data.info }).then(response => {
+      Promise.resolve(events.request.call(globalThis.lx, { source: data.source, action: data.action, info: requestInfo })).then(response => {
         let result
         switch (data.action) {
           case 'musicUrl':
-            if (typeof response != 'string' || response.length > 2048 || !/^https?:/.test(response)) throw new Error('failed')
             result = {
               source: data.source,
               action: data.action,
               data: {
                 type: data.info.type,
-                url: response,
+                ...verifyMusicUrlInfo(response),
               },
             }
             break
@@ -254,8 +302,11 @@ globalThis.lx_setup = (key, id, name, description, version, author, homepage, ra
       }).catch(err => {
         // console.log('handleRequest err', err)
         nativeCall(NATIVE_EVENTS_NAMES.response, { requestKey, status: false, errorMessage: err.message })
+      }).finally(() => {
+        if (requestContext) popRequestContext(requestContext)
       })
     } catch (err) {
+      if (requestContext) popRequestContext(requestContext)
       // console.log('handleRequest call err', err)
       nativeCall(NATIVE_EVENTS_NAMES.response, { requestKey, status: false, errorMessage: err.message })
     }

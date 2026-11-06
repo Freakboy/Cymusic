@@ -1,4 +1,5 @@
 import { adaptLxMusicScript, isLxMusicScript } from './lxMusicSourceAdapter'
+import type { SourceRequestContext } from '@/player/sourceResolver/platforms'
 
 type SourceChannelCapability = {
 	type?: string
@@ -10,7 +11,7 @@ export type SourceCapabilities = Partial<Record<LX.Source, SourceChannelCapabili
 
 export type SourceMusicApi = IMusic.MusicApi & {
 	sources?: SourceCapabilities
-	getLyric?: (title: string, artist: string, songmid: string) => Promise<unknown>
+	getLyric?: (title: string, artist: string, songmid: string, context?: SourceRequestContext) => Promise<unknown>
 }
 
 export interface ModuleExports {
@@ -21,12 +22,17 @@ export interface ModuleExports {
 	srcUrl?: string
 	sources?: SourceCapabilities
 	getLyric?: SourceMusicApi['getLyric']
+	// Original four positional arguments stay intact. Foreign platforms require an
+	// explicit sources capability and use context.platform/musicInfo, never qqmid.
 	getMusicUrl?: (
 		songname: string,
 		artist: string,
 		songmid: string,
 		quality: string,
-	) => Promise<string>
+		context?: SourceRequestContext,
+	) => Promise<
+		string | { url: string; headers?: Record<string, string>; userAgent?: string } | null
+	>
 }
 
 export async function createMusicApiFromScript(rawScript: string): Promise<SourceMusicApi> {

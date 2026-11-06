@@ -14,6 +14,7 @@ import { useThemeColors } from '@/hooks/useAppTheme'
 import { usePlaylistFeatureText } from '@/locales/playlistFeature'
 import { playListsStore } from '@/player/PlayerStore'
 import { useDefaultStyles } from '@/styles'
+import { Ionicons } from '@expo/vector-icons'
 import * as ImagePicker from 'expo-image-picker'
 import { router } from 'expo-router'
 import { useHeaderHeight } from 'expo-router/react-navigation'
@@ -38,7 +39,8 @@ const ImportPlayList = () => {
 	const styles = useMemo(() => createStyles(colors, defaultStyles), [colors, defaultStyles])
 	const text = usePlaylistFeatureText()
 	const playlists = playListsStore.useValue() || []
-	const [action, setAction] = useState<'create' | 'import'>('import')
+	const [newName, setNewName] = useState('')
+	const [newCover, setNewCover] = useState<string | undefined>()
 	const [playlistUrl, setPlaylistUrl] = useState('')
 	const [preview, setPreview] = useState<RemotePlaylistResult | null>(null)
 	const [isLoading, setIsLoading] = useState(false)
@@ -71,7 +73,7 @@ const ImportPlayList = () => {
 		setImportMode('update')
 	}
 
-	const pickImage = async () => {
+	const pickImage = async (create = false) => {
 		const current = requestId.current
 		try {
 			const result = await ImagePicker.launchImageLibraryAsync({
@@ -80,7 +82,10 @@ const ImportPlayList = () => {
 				aspect: [1, 1],
 				quality: 1,
 			})
-			if (current === requestId.current && !result.canceled) setCoverImage(result.assets[0].uri)
+			if (current === requestId.current && !result.canceled) {
+				if (create) setNewCover(result.assets[0].uri)
+				else setCoverImage(result.assets[0].uri)
+			}
 		} catch (err) {
 			if (current === requestId.current) setError(text.coverFailed)
 			logError('Playlist cover:', err)
@@ -118,9 +123,9 @@ const ImportPlayList = () => {
 		}
 	}
 
-	const handleSave = async () => {
+	const handleSave = async (action: 'create' | 'import') => {
 		if (saving.current || busy.current) return
-		if (action === 'create' && !customName.trim()) {
+		if (action === 'create' && !newName.trim()) {
 			setError(text.nameRequired)
 			return
 		}
@@ -135,10 +140,10 @@ const ImportPlayList = () => {
 					id: Date.now().toString(),
 					platform: 'local',
 					artist: text.unknownArtist,
-					name: customName.trim(),
-					title: customName.trim(),
+					name: newName.trim(),
+					title: newName.trim(),
 					songs: [],
-					artwork: coverImage || unknownTrackImageUri,
+					artwork: newCover || unknownTrackImageUri,
 					tracks: [],
 				} as IMusic.PlayList)
 			} else if (preview) {
@@ -159,37 +164,64 @@ const ImportPlayList = () => {
 			edges={['left', 'right', 'bottom']}
 			style={[styles.container, { paddingTop: Math.max(headerHeight, insets.top, 16) }]}
 		>
+			<View pointerEvents="none" style={[styles.dismissSymbol, { top: insets.top - 25 }]}>
+				<View style={styles.dismissBar} />
+			</View>
 			<KeyboardAvoidingView
 				behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
 				style={styles.flex}
 			>
 				<ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-					<Text style={styles.header}>{text.title}</Text>
-					<View style={styles.row}>
-						{(['create', 'import'] as const).map((item) => (
+					<View style={styles.section}>
+						<Text style={styles.sectionTitle}>{text.createSection}</Text>
+						<View style={styles.card}>
+							<View style={styles.createRow}>
+								<TouchableOpacity
+									accessibilityRole="button"
+									accessibilityLabel={text.chooseCover}
+									disabled={isSaving || isLoading}
+									onPress={() => void pickImage(true)}
+									style={styles.createCover}
+								>
+									{newCover ? (
+										<Image source={{ uri: newCover }} style={styles.createCover} />
+									) : (
+										<>
+											<Ionicons name="image-outline" size={24} color={colors.primary} />
+											<Text style={styles.coverText}>{text.chooseCover}</Text>
+										</>
+									)}
+								</TouchableOpacity>
+								<TextInput
+									style={[styles.input, styles.flex]}
+									value={newName}
+									onChangeText={setNewName}
+									editable={!isSaving}
+									placeholder={text.name}
+									accessibilityLabel={text.name}
+									placeholderTextColor={colors.placeholder}
+									returnKeyType="done"
+								/>
+							</View>
 							<TouchableOpacity
-								key={item}
 								accessibilityRole="button"
-								accessibilityState={{ selected: action === item }}
-								disabled={isSaving}
-								style={[styles.choice, action === item && styles.selected]}
-								onPress={() => {
-									if (action === item) return
-									invalidate()
-									setAction(item)
-									setCustomName('')
-									setCoverImage(undefined)
-								}}
+								style={styles.button}
+								disabled={isSaving || isLoading}
+								onPress={() => void handleSave('create')}
 							>
-								<Text style={[styles.choiceText, action === item && styles.selectedText]}>
-									{text[item]}
-								</Text>
+								{isSaving ? (
+									<ActivityIndicator color={colors.primary} />
+								) : (
+									<Ionicons name="add-circle-outline" size={24} color={colors.primary} />
+								)}
+								<Text style={styles.buttonText}>{isSaving ? text.saving : text.create}</Text>
 							</TouchableOpacity>
-						))}
+						</View>
 					</View>
-
-					{action === 'import' && (
-						<View style={styles.section}>
+					<View style={styles.divider} />
+					<View style={styles.section}>
+						<Text style={styles.sectionTitle}>{text.importSection}</Text>
+						<View style={styles.card}>
 							<Text style={styles.label}>{text.source}</Text>
 							<View style={styles.row}>
 								{([undefined, 'QQ', 'Netease'] as const).map((item) => (
@@ -223,7 +255,7 @@ const ImportPlayList = () => {
 								placeholderTextColor={colors.placeholder}
 								autoCapitalize="none"
 								autoCorrect={false}
-								keyboardType="url"
+								multiline
 								returnKeyType="done"
 								onSubmitEditing={handlePreview}
 							/>
@@ -239,97 +271,97 @@ const ImportPlayList = () => {
 									{isLoading ? text.recognizing : error && !preview ? text.retry : text.preview}
 								</Text>
 							</TouchableOpacity>
-						</View>
-					)}
-
-					{preview && action === 'import' && (
-						<View style={styles.section}>
-							<Text style={styles.label}>{text.previewTitle}</Text>
-							<View style={styles.previewRow}>
-								<Image
-									source={{ uri: preview.artwork || unknownTrackImageUri }}
-									style={styles.cover}
-									accessibilityLabel={text.cover}
-								/>
-								<View style={styles.flex}>
-									<Text style={styles.label}>{preview.name}</Text>
+							{preview && (
+								<View style={styles.preview}>
+									<Text style={styles.label}>{text.previewTitle}</Text>
+									<View style={styles.previewRow}>
+										<Image
+											source={{ uri: preview.artwork || unknownTrackImageUri }}
+											style={styles.cover}
+											accessibilityLabel={text.cover}
+										/>
+										<View style={styles.flex}>
+											<Text style={styles.label}>{preview.name}</Text>
+											<Text style={styles.hint}>
+												{text[preview.remoteBinding.platform]} · {preview.songs.length} {text.songs}
+											</Text>
+										</View>
+									</View>
 									<Text style={styles.hint}>
-										{text[preview.remoteBinding.platform]} · {preview.songs.length} {text.songs}
+										{existing ? `${text.exists}: ${existing.name}` : text.newPlaylist}
+									</Text>
+									{preview.qqCompleteness?.unavailableSongIds?.length > 0 && (
+										<Text style={styles.hint}>{preview.qqCompleteness.unavailableSongIds.length} {text.unavailableSongs}</Text>
+									)}
+									{existing && (
+										<View style={styles.row}>
+											{(['update', 'copy', 'merge'] as const).map((mode) => (
+												<TouchableOpacity
+													key={mode}
+													accessibilityRole="button"
+													accessibilityState={{ selected: importMode === mode }}
+													disabled={isSaving}
+													onPress={() => {
+														requestId.current++
+														setImportMode(mode)
+														setError(null)
+													}}
+													style={[styles.choice, importMode === mode && styles.selected]}
+												>
+													<Text
+														style={[styles.choiceText, importMode === mode && styles.selectedText]}
+													>
+														{text[mode]}
+													</Text>
+												</TouchableOpacity>
+											))}
+										</View>
+									)}
+									<Text style={styles.hint}>
+										{existing ? text[`${importMode}Hint`] : text.refreshHint}
 									</Text>
 								</View>
-							</View>
-							<Text style={styles.hint}>
-								{existing ? `${text.exists}: ${existing.name}` : text.newPlaylist}
-							</Text>
-							{existing && (
-								<View style={styles.row}>
-									{(['update', 'copy', 'merge'] as const).map((mode) => (
-										<TouchableOpacity
-											key={mode}
-											accessibilityRole="button"
-											accessibilityState={{ selected: importMode === mode }}
-											disabled={isSaving}
-											onPress={() => {
-												requestId.current++
-												setImportMode(mode)
-												setError(null)
-											}}
-											style={[styles.choice, importMode === mode && styles.selected]}
-										>
-											<Text style={[styles.choiceText, importMode === mode && styles.selectedText]}>
-												{text[mode]}
-											</Text>
-										</TouchableOpacity>
-									))}
+							)}
+
+							{preview && (
+								<View style={styles.preview}>
+									<Text style={styles.label}>{text.customize}</Text>
+									<TouchableOpacity
+										accessibilityRole="button"
+										accessibilityLabel={text.chooseCover}
+										disabled={isSaving}
+										onPress={() => void pickImage()}
+										style={styles.coverPicker}
+									>
+										{coverImage ? (
+											<Image source={{ uri: coverImage }} style={styles.cover} />
+										) : (
+											<Text style={styles.buttonText}>{text.chooseCover}</Text>
+										)}
+									</TouchableOpacity>
+									<TextInput
+										style={styles.input}
+										value={customName}
+										onChangeText={setCustomName}
+										editable={!isSaving}
+										placeholder={text.optionalName}
+										accessibilityLabel={text.name}
+										placeholderTextColor={colors.placeholder}
+										returnKeyType="done"
+									/>
+									<TouchableOpacity
+										accessibilityRole="button"
+										style={styles.button}
+										disabled={isSaving}
+										onPress={() => void handleSave('import')}
+									>
+										{isSaving && <ActivityIndicator color={colors.primary} />}
+										<Text style={styles.buttonText}>{isSaving ? text.saving : text.confirm}</Text>
+									</TouchableOpacity>
 								</View>
 							)}
-							<Text style={styles.hint}>
-								{existing ? text[`${importMode}Hint`] : text.refreshHint}
-							</Text>
 						</View>
-					)}
-
-					{(action === 'create' || preview) && (
-						<View style={styles.section}>
-							<Text style={styles.label}>
-								{action === 'create' ? text.details : text.customize}
-							</Text>
-							<TouchableOpacity
-								accessibilityRole="button"
-								accessibilityLabel={text.chooseCover}
-								disabled={isSaving}
-								onPress={pickImage}
-								style={styles.coverPicker}
-							>
-								{coverImage ? (
-									<Image source={{ uri: coverImage }} style={styles.cover} />
-								) : (
-									<Text style={styles.buttonText}>{text.chooseCover}</Text>
-								)}
-							</TouchableOpacity>
-							<TextInput
-								style={styles.input}
-								value={customName}
-								onChangeText={setCustomName}
-								editable={!isSaving}
-								placeholder={action === 'create' ? text.name : text.optionalName}
-								accessibilityLabel={text.name}
-								placeholderTextColor={colors.placeholder}
-								returnKeyType="done"
-							/>
-							<TouchableOpacity
-								accessibilityRole="button"
-								style={styles.button}
-								disabled={isSaving}
-								onPress={handleSave}
-							>
-								{isSaving && <ActivityIndicator color={colors.primary} />}
-								<Text style={styles.buttonText}>
-									{isSaving ? text.saving : action === 'create' ? text.create : text.confirm}
-								</Text>
-							</TouchableOpacity>
-						</View>
-					)}
+					</View>
 					{error && (
 						<Text accessibilityRole="alert" style={styles.error}>
 							{error}
@@ -355,10 +387,26 @@ const ImportPlayList = () => {
 const createStyles = (colors: ThemeColors, defaultStyles: ReturnType<typeof useDefaultStyles>) =>
 	StyleSheet.create({
 		container: { ...defaultStyles.container, paddingHorizontal: screenPadding.horizontal },
+		dismissSymbol: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
+		dismissBar: { width: 50, height: 5, borderRadius: 2.5, backgroundColor: colors.dismissBar },
 		flex: { flex: 1 },
-		content: { gap: 16, paddingBottom: 16 },
-		header: { fontSize: 28, fontWeight: 'bold', color: colors.text },
-		section: { gap: 12, padding: 16, borderRadius: 12, backgroundColor: colors.surface },
+		content: { paddingBottom: 24 },
+		section: { marginBottom: 24 },
+		sectionTitle: { fontSize: 20, fontWeight: '600', color: colors.text, marginBottom: 16 },
+		card: { gap: 16, padding: 16, borderRadius: 12, backgroundColor: colors.surface },
+		divider: { height: 1, backgroundColor: colors.separator, marginVertical: 24 },
+		createRow: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+		createCover: {
+			width: 100,
+			height: 100,
+			borderRadius: 8,
+			backgroundColor: colors.surfaceMuted,
+			alignItems: 'center',
+			justifyContent: 'center',
+			overflow: 'hidden',
+		},
+		coverText: { color: colors.primary, fontSize: 14, marginTop: 8 },
+		preview: { gap: 12 },
 		label: { fontSize: 17, fontWeight: '600', color: colors.text },
 		hint: { fontSize: 14, lineHeight: 21, color: colors.textMuted },
 		row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
@@ -378,7 +426,7 @@ const createStyles = (colors: ThemeColors, defaultStyles: ReturnType<typeof useD
 		selectedText: { color: colors.background },
 		input: {
 			minHeight: 44,
-			paddingHorizontal: 12,
+			paddingHorizontal: 16,
 			paddingVertical: 10,
 			borderRadius: 8,
 			fontSize: 16,
@@ -404,7 +452,7 @@ const createStyles = (colors: ThemeColors, defaultStyles: ReturnType<typeof useD
 			borderRadius: 8,
 			backgroundColor: colors.surfaceMuted,
 		},
-		buttonText: { fontSize: 16, fontWeight: '600', color: colors.primary, textAlign: 'center' },
+		buttonText: { fontSize: 18, fontWeight: '600', color: colors.primary, textAlign: 'center' },
 		error: { color: colors.error, fontSize: 14, lineHeight: 21 },
 	})
 

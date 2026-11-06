@@ -181,6 +181,7 @@ function settingsRuntime() {
 			useThemeMode: () => ({ themeMode: 'system', setThemeMode() {} }),
 		},
 		'@/helpers/userApi/importMusicSource': {},
+		'@/player/PlayerStore': { musicApiSelectedStore: h.stores.musicApiSelectedStore },
 		'@/store/PersistStatus': h.persistence,
 		'@/utils/i18n': { __esModule: true, default: i18n, nowLanguage: { useValue: () => i18n.locale } },
 		'@/utils/stateMapper': h.load('src/utils/stateMapper.ts'),

@@ -4,6 +4,7 @@ import {
 	reloadLxMusicScript,
 } from '@/helpers/userApi/lxMusicSourceAdapter'
 import type { ModuleExports, SourceMusicApi } from '@/helpers/userApi/importMusicSource'
+import type { SourceRequestContext } from './platforms'
 
 const queue: { priority: number; run: () => Promise<void> }[] = []
 let running = false
@@ -64,4 +65,40 @@ export async function loadResolverSource(
 
 export function releaseResolverRuntime() {
 	disposeLxMusicScript()
+}
+
+// CommonJS has no native singleton to retire. Bound a stuck plugin promise so
+// cancellation cannot strand the runtime queue; observe late rejection via race.
+export async function requestSourceUrl(
+	api: SourceMusicApi,
+	title: string,
+	artist: string,
+	qqmid: string,
+	quality: string,
+	context: SourceRequestContext,
+) {
+	if (context.signal?.aborted) throw new Error('SOURCE_CANCELLED')
+	if (isLxSource(api)) return api.getMusicUrl(title, artist, qqmid, quality, context)
+	let timer: ReturnType<typeof setTimeout> | undefined
+	let abort: (() => void) | undefined
+	try {
+		return await Promise.race([
+			Promise.resolve().then(() => {
+				if (context.signal?.aborted) throw new Error('SOURCE_CANCELLED')
+				return api.getMusicUrl(title, artist, qqmid, quality, context)
+			}),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(
+					() => reject(new Error('SOURCE_REQUEST_TIMEOUT')),
+					context.timeoutMs ?? 5000,
+				)
+				abort = () => reject(new Error('SOURCE_CANCELLED'))
+				context.signal?.addEventListener('abort', abort, { once: true })
+				if (context.signal?.aborted) abort()
+			}),
+		])
+	} finally {
+		if (timer) clearTimeout(timer)
+		if (abort) context.signal?.removeEventListener('abort', abort)
+	}
 }

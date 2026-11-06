@@ -10,6 +10,7 @@ import myTrackPlayer, {
 } from '@/helpers/trackPlayerIndex'
 import { useThemeColors, useThemeMode } from '@/hooks/useAppTheme'
 import PersistStatus from '@/store/PersistStatus'
+import { musicApiSelectedStore } from '@/player/PlayerStore'
 import i18n, { changeLanguage, nowLanguage } from '@/utils/i18n'
 import { showToast } from '@/utils/utils'
 import { MenuView } from '@react-native-menu/menu'
@@ -84,6 +85,7 @@ const SettingModal = () => {
 	const [currentQuality, setCurrentQuality] = useCurrentQuality()
 	const [isLoading, setIsLoading] = useState(false)
 	const apiState = nowApiState.useValue()
+	const selectedSource = musicApiSelectedStore.useValue()
 	const language = nowLanguage.useValue()
 	const autoCacheLocal = autoCacheLocalStore.useValue()
 	const preloadNextTrack = PersistStatus.useValue('music.preloadNextTrack', true) === true
@@ -420,6 +422,8 @@ const SettingModal = () => {
 			<View key={item.id}>
 				<TouchableOpacity
 					key={item.id}
+					accessibilityRole="button"
+					accessibilityLabel={item.title}
 					style={itemStyle}
 					onPress={() => {
 						if (item.id === 'sourceManagement') {
@@ -460,6 +464,9 @@ const SettingModal = () => {
 					{item.icon && <Image source={item.icon} style={styles.icon} />}
 					<View style={styles.itemContent}>
 						<Text style={styles.itemText}>{item.title}</Text>
+						{item.id === 'sourceManagement' && selectedSource && (
+							<Text numberOfLines={1} style={[styles.itemValue, styles.sourceValue]}>{selectedSource.name}</Text>
+						)}
 						{item.type === 'value' && <Text style={styles.itemValue}>{item.value}</Text>}
 						{item.title === i18n.t('settings.items.currentQuality') && (
 							<MusicQualityMenu currentQuality={currentQuality} onSelectQuality={setCurrentQuality} />
@@ -594,6 +601,7 @@ const createStyles = (colors: ThemeColors) =>
 		marginBottom: 5,
 	},
 	item: {
+		minHeight: 44,
 		flexDirection: 'row',
 		alignItems: 'center',
 		padding: 16,
@@ -656,11 +664,16 @@ const createStyles = (colors: ThemeColors) =>
 		fontSize: 16,
 		color: colors.textMuted,
 	},
+	sourceValue: { flex: 1, textAlign: 'right', marginHorizontal: 12 },
 	arrowRight: {
 		fontSize: 18,
 		color: colors.textMuted,
 	},
 	menuTrigger: {
+		minWidth: 44,
+		minHeight: 44,
+		marginVertical: -12,
+		justifyContent: 'flex-end',
 		flexDirection: 'row',
 		alignItems: 'center',
 	},

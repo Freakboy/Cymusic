@@ -2,8 +2,10 @@ import { nowLanguage } from '@/utils/i18n'
 
 const zh = {
 	sources: '音源管理',
+	importSource: '导入音源',
+	more: '更多操作',
 	resolver:
-		'当前播放器仅适配 QQ Music (tx) URL 解析。音源如提供歌词和译文则优先使用，失败回退平台；搜索、歌手、专辑和歌单由 QQ Music 提供。',
+		'音源提供播放 URL 解析；歌词和译文优先使用音源结果，失败回退平台。搜索、歌手、专辑和歌单由平台提供。',
 	channels: '渠道能力（来自脚本声明，并非逐渠道实测）',
 	channelTx: 'QQ音乐 (tx)',
 	channelWy: '网易云音乐 (wy)',
@@ -14,8 +16,9 @@ const zh = {
 	undeclared: '未声明（未知）',
 	unsupported: '不支持 URL 解析',
 	channelScope:
-		'tx: QQ Music · wy: 网易云 · kg: 酷狗 · kw: 酷我 · mg: 咪咕。其他渠道即使声明支持，当前播放器也未适配。LX 以初始化后 SDK 公开能力为准；未加载的脚本能力未知。',
-	testScope: 'URL 测试仅请求 tx 的一首歌曲 / 128k，不代表全部歌曲、音质或渠道可用。',
+		'tx: QQ Music · wy: 网易云 · kg: 酷狗 · kw: 酷我 · mg: 咪咕。渠道能力以脚本声明或初始化后公开的 capabilities 为准；未声明或未加载时显示未知，不代表不支持。',
+	testScope:
+		'测试范围以实际加载的渠道能力和测试结果为准。tx 优先，其他渠道按 capabilities 回退；单次返回 URL 不代表全部歌曲、音质或渠道可用。',
 	url: '音源脚本 URL',
 	importUrl: '从 URL 导入',
 	importFile: '从文件导入',
@@ -23,14 +26,14 @@ const zh = {
 	selected: '当前音源',
 	reload: '重新加载当前源',
 	update: '从导入 URL 更新',
-	test: '测试 tx URL 解析',
+	test: '测试 URL 解析',
 	enabled: '启用',
 	up: '上移',
 	down: '下移',
 	delete: '删除',
 	emptySources: '尚未导入音源',
-	testing: '正在解析 tx 测试歌曲 URL...',
-	resolved: 'tx 已返回有效 HTTP(S) URL，未验证音频播放，也不代表其他渠道可用。',
+	testing: '正在解析测试歌曲 URL...',
+	resolved: '已返回有效 HTTP(S) URL；未验证音频播放，不代表全部歌曲、音质或渠道可用。',
 	currentOnly: '为避免影响播放，仅支持测试当前已加载的音源。请先选择该音源。',
 	busy: '音源请求仍在处理中，请稍后再试。',
 	failed: '操作失败',
@@ -51,8 +54,10 @@ const zh = {
 }
 const en: typeof zh = {
 	sources: 'Music Sources',
+	importSource: 'Import source',
+	more: 'More actions',
 	resolver:
-		'Playback currently adapts QQ Music (tx) URL resolution only. Source lyrics and translations are preferred when available, with platform fallback. Search, artists, albums and playlists use QQ Music.',
+		'Sources resolve playback URLs. Source lyrics and translations are preferred, with platform fallback. Search, artists, albums and playlists use platform metadata.',
 	channels: 'Channel capabilities (script declarations, not channel tests)',
 	channelTx: 'QQ Music (tx)',
 	channelWy: 'NetEase Music (wy)',
@@ -63,9 +68,9 @@ const en: typeof zh = {
 	undeclared: 'Undeclared (unknown)',
 	unsupported: 'URL resolution unsupported',
 	channelScope:
-		'tx: QQ Music · wy: NetEase · kg: Kugou · kw: Kuwo · mg: Migu. Other declared channels are not adapted by this player. LX capabilities reflect the public SDK initialization result; unloaded scripts have unknown capabilities.',
+		'tx: QQ Music · wy: NetEase · kg: Kugou · kw: Kuwo · mg: Migu. Capabilities reflect script declarations or public initialization results. Undeclared or unloaded capabilities are unknown, not unsupported.',
 	testScope:
-		'The URL test requests one tx song at 128k only. It does not verify all songs, qualities or channels.',
+		'Test coverage depends on loaded capabilities and actual results. Prefer tx, with fallback according to capabilities. One returned URL does not verify all songs, qualities or channels.',
 	url: 'Source script URL',
 	importUrl: 'Import URL',
 	importFile: 'Import file',
@@ -73,15 +78,15 @@ const en: typeof zh = {
 	selected: 'Current source',
 	reload: 'Reload current source',
 	update: 'Update from import URL',
-	test: 'Test tx URL resolution',
+	test: 'Test URL resolution',
 	enabled: 'Enabled',
 	up: 'Move up',
 	down: 'Move down',
 	delete: 'Delete',
 	emptySources: 'No sources imported',
-	testing: 'Resolving a tx test song URL...',
+	testing: 'Resolving a test song URL...',
 	resolved:
-		'tx returned a valid HTTP(S) URL. Audio playback and other channels have not been verified.',
+		'A valid HTTP(S) URL was returned. Audio playback, all songs, qualities and channels have not been verified.',
 	currentOnly:
 		'To protect playback, only the currently loaded source can be tested. Select this source first.',
 	busy: 'A source request is still in progress. Try again later.',

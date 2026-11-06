@@ -86,26 +86,32 @@ export async function fetchSourceLyric(
 	let expired = false
 	const current = () => !expired && isCurrent() && musicApiSelectedStore.getValue() === source
 	let timer: ReturnType<typeof setTimeout> | undefined
-	// Keep ownership until the actual plugin promise settles, even if the UI times out.
+	const controller = new AbortController()
+	const deadline = new Promise<null>((resolve) => {
+		timer = setTimeout(() => {
+			expired = true
+			controller.abort()
+			resolve(null)
+		}, timeoutMs)
+	})
+	// The same deadline bounds both queue waiting and execution under the lock.
+	// Promise.race observes a CommonJS rejection even after the deadline releases ownership.
 	const request = withSourceRuntimeLock(async () => {
 		if (!current()) return null
 		// CommonJS selection reloads can retain old optional closures. Rebuild from
 		// the current script here, under the same lock as playback, after persistence too.
-		const loaded = isLxSource(source) ? source : await loadResolverSource(source, true)
-		if (!current() || typeof loaded.getLyric !== 'function') return null
-		const lyric = normalizeSourceLyric(await loaded.getLyric(item.title, item.artist, item.songmid))
+		const loaded = isLxSource(source)
+			? source
+			: await Promise.race([loadResolverSource(source, true), deadline])
+		if (!loaded || !current() || typeof loaded.getLyric !== 'function') return null
+		const work = isLxSource(loaded)
+			? loaded.getLyric(item.title, item.artist, item.songmid, { signal: controller.signal, timeoutMs })
+			: loaded.getLyric(item.title, item.artist, item.songmid)
+		const lyric = normalizeSourceLyric(await Promise.race([work, deadline]))
 		return current() ? lyric : null
 	})
 	try {
-		return await Promise.race([
-			request,
-			new Promise<null>((resolve) => {
-				timer = setTimeout(() => {
-					expired = true
-					resolve(null)
-				}, timeoutMs)
-			}),
-		])
+		return await Promise.race([request, deadline])
 	} catch {
 		return null
 	} finally {

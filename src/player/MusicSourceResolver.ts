@@ -11,11 +11,16 @@ import {
 	preloadNextTrackStore,
 } from './PlayerStore'
 import { sourceId, songKey, type CacheIdentity } from './sourceIdentity'
-import { resolveQQMid } from './sourceResolver/qqMatch'
+import {
+	RESOLUTION_PLATFORMS,
+	resolvePlatformMusicInfo,
+	supportsPlatform,
+} from './sourceResolver/platforms'
 import {
 	isLxSource,
 	loadResolverSource,
 	releaseResolverRuntime,
+	requestSourceUrl,
 	withSourceRuntimeLock,
 } from './sourceResolver/runtime'
 import type { Track } from './types'
@@ -49,6 +54,7 @@ let preparation: {
 let prepared: PreparedNextTrack | null = null
 let currentRequests = 0
 let currentStreamHasPriority = false
+const isUnavailable = (item: IMusic.IMusicItem) => !!item.unavailable || String(item.id).startsWith('unavailable:')
 
 /** Set while the current remote stream is loading/buffering; clear once output is stable. */
 export function setCurrentStreamPriority(priority: boolean) {
@@ -68,7 +74,9 @@ const preferenceKey = () =>
 	JSON.stringify([
 		sourceId(musicApiSelectedStore.getValue()),
 		qualityStore.getValue(),
-		(musicApiStore.getValue() || []).filter((api) => api.enabled !== false).map(sourceId),
+		(musicApiStore.getValue() || [])
+			.filter((api) => api.enabled !== false)
+			.map((api) => sourceId(api)),
 	])
 const preparationKey = (item: IMusic.IMusicItem) => JSON.stringify([songKey(item), preferenceKey()])
 
@@ -87,6 +95,10 @@ export function prepareNextTrack(
 	token: string,
 	playbackOptions?: MediaItemPlaybackOptions,
 ): Promise<PreparedNextTrack | null> {
+	if (isUnavailable(item)) {
+		cancelPreparedNextTrack()
+		return Promise.resolve(null)
+	}
 	const key = JSON.stringify([
 		preparationKey(item),
 		token,
@@ -181,7 +193,6 @@ async function resolveUncached(
 ): Promise<SourceResult> {
 	const selected = musicApiSelectedStore.getValue()
 	if (!selected) throw new Error('请先导入音源')
-	const mid = await resolveQQMid(item, signal)
 	assertActive(signal)
 	return withSourceRuntimeLock(async () => {
 		assertActive(signal)
@@ -193,40 +204,80 @@ async function resolveUncached(
 		const requestedQuality = qualityStore.getValue()
 		let touchedRuntime = false
 		try {
-			for (const api of apis) {
-				assertActive(signal)
-				let loaded: IMusic.MusicApi
+			for (const platform of RESOLUTION_PLATFORMS) {
+				const candidates: { api: IMusic.MusicApi; loaded: IMusic.MusicApi; qualities: IMusic.IQualityKey[] }[] = []
+				// Check every source's quality fallback before this platform needs the network.
+				for (const api of apis) {
+					assertActive(signal)
+					let loaded: IMusic.MusicApi
+					try {
+						if (isLxSource(api)) touchedRuntime = true
+						loaded = await loadResolverSource(api)
+					} catch {
+						continue
+					}
+					if (!supportsPlatform(loaded, platform)) continue
+					const capability = loaded.sources?.[platform]
+					const allowedQualities = qualities.slice(Math.max(0, qualities.indexOf(requestedQuality))).filter(quality => !capability || !capability.qualitys || capability.qualitys.includes(quality))
+					for (const quality of allowedQualities) {
+						assertActive(signal)
+						const identity = { sourceId: sourceId(api, platform), quality }
+						const cached = await findCachedPath(item, identity)
+						assertActive(signal)
+						if (cached) return { url: cached, wasCached: true, cacheIdentity: identity }
+					}
+					if (allowedQualities.length) candidates.push({ api, loaded, qualities: allowedQualities })
+				}
+				if (!candidates.length) continue
+				let musicInfo: Awaited<ReturnType<typeof resolvePlatformMusicInfo>>
 				try {
-					if (isLxSource(api)) touchedRuntime = true
-					loaded = await loadResolverSource(api)
-				} catch {
+					musicInfo = await resolvePlatformMusicInfo(item, platform, signal)
+				} catch (error) {
+					if (signal.aborted) throw error
 					continue
 				}
-				for (const quality of qualities.slice(Math.max(0, qualities.indexOf(requestedQuality)))) {
+				for (const { api, loaded: candidate, qualities: allowedQualities } of candidates) {
 					assertActive(signal)
-					const identity = { sourceId: sourceId(api), quality }
-					const cached = await findCachedPath(item, identity)
-					assertActive(signal)
-					if (cached) return { url: cached, wasCached: true, cacheIdentity: identity }
-					try {
-						const result = await loaded.getMusicUrl(item.title, item.artist, mid, quality, {
-							requestKey: `${requestType}_${Date.now()}_${Math.random()}`,
-							requestType,
-							timeoutMs: requestType === 'current' ? 5000 : 12000,
-							signal,
-						})
-						assertActive(signal)
-						const source = typeof result === 'string' ? { url: result } : result
-						if (source && /^https?:\/\/\S+$/i.test(source.url))
-							return {
-								url: source.url,
-								headers: source.headers,
-								userAgent: source.userAgent,
-								wasCached: false,
-								cacheIdentity: identity,
-							}
-					} catch (error) {
-						if (signal.aborted) throw error
+					let loaded = candidate
+					// The cache pass may have replaced the native singleton with another source.
+					if (isLxSource(api)) {
+						try {
+							loaded = await loadResolverSource(api)
+						} catch {
+							continue
+						}
+					}
+					for (const quality of allowedQualities) {
+						const identity = { sourceId: sourceId(api, platform), quality }
+						try {
+							const result = await requestSourceUrl(
+								loaded,
+								item.title,
+								item.artist,
+								platform === 'tx' ? String(musicInfo.songmid) : '',
+								quality,
+								{
+									platform,
+									musicInfo,
+									requestKey: `${requestType}_${Date.now()}_${Math.random()}`,
+									requestType,
+									timeoutMs: requestType === 'current' ? 5000 : 12000,
+									signal,
+								},
+							)
+							assertActive(signal)
+							const source = typeof result === 'string' ? { url: result } : result
+							if (source && /^https?:\/\/\S+$/i.test(source.url))
+								return {
+									url: source.url,
+									headers: source.headers,
+									userAgent: source.userAgent,
+									wasCached: false,
+									cacheIdentity: identity,
+								}
+						} catch (error) {
+							if (signal.aborted) throw error
+						}
 					}
 				}
 			}
@@ -236,8 +287,13 @@ async function resolveUncached(
 			if (touchedRuntime) {
 				const latest = musicApiSelectedStore.getValue()
 				if (latest && isLxSource(latest)) {
-					const restored = await loadResolverSource(latest)
-					if (musicApiSelectedStore.getValue() === latest) musicApiSelectedStore.setValue(restored)
+					try {
+						const restored = await loadResolverSource(latest)
+						if (musicApiSelectedStore.getValue() === latest)
+							musicApiSelectedStore.setValue(restored)
+					} catch {
+						releaseResolverRuntime()
+					}
 				} else releaseResolverRuntime()
 			}
 		}
@@ -262,6 +318,10 @@ export async function resolveSource(
 	let timedOut = false
 	try {
 		assertActive(controller.signal)
+		if (isUnavailable(item)) {
+			if (isCurrent) showToast('歌曲不可用', '该歌曲暂不可播放', 'error')
+			return { url: fakeAudioMp3Uri, wasCached: false }
+		}
 		const local = await resolveLocalFile(item.url)
 		assertActive(controller.signal)
 		if (local.status === 'resolved')

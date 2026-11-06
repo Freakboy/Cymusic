@@ -19,6 +19,9 @@ import {
 import { Buffer } from 'buffer'
 import { logError, logInfo } from '../logger'
 import type { SourceCapabilities, SourceMusicApi } from './importMusicSource'
+import type { SourceRequestContext } from '@/player/sourceResolver/platforms'
+
+const RESOLUTION_PLATFORMS = ['tx', 'wy', 'kg', 'kw', 'mg'] as const
 
 // ============================================================
 // 格式检测
@@ -85,11 +88,7 @@ export const parseLxMusicScriptInfo = (
 
 type LxRequestType = 'current' | 'preload'
 
-type LxRequestContext = {
-	requestKey?: string
-	requestType?: LxRequestType
-	timeoutMs?: number
-}
+type LxRequestContext = SourceRequestContext
 
 type PendingRequest = {
 	resolve: (result: unknown) => void
@@ -108,6 +107,7 @@ type SettledRequest = {
 type HttpRequest = {
 	controller: AbortController
 	timeout: ReturnType<typeof setTimeout> | null
+	parentRequestKey?: string
 }
 
 type LxRuntime = {
@@ -237,7 +237,10 @@ const handleScriptAction = (runtime: LxRuntime, event: any) => {
 			// 脚本初始化完成
 			const data = event.data
 			if (data.status) {
-				runtime.sources = data.info?.sources
+				runtime.sources = Object.fromEntries(RESOLUTION_PLATFORMS.filter(source => {
+					const capability = data.info?.sources?.[source]
+					return capability?.type === 'music' && Array.isArray(capability.actions) && Array.isArray(capability.qualitys)
+				}).map(source => [source, data.info.sources[source]]))
 				logInfo('[lxMusicAdapter] Script initialized successfully')
 				runtime.inited = true
 				runtime.init?.resolve()
@@ -283,7 +286,7 @@ const handleScriptAction = (runtime: LxRuntime, event: any) => {
 						const url = result?.data?.url
 						if (typeof url === 'string' && /^https?:/.test(url)) {
 							logInfo(`${logPrefix} musicUrl resolved: ${url}`)
-							pending.resolve(url)
+							pending.resolve(result.data.headers || result.data.userAgent ? result.data : url)
 						} else {
 							pending.reject(new Error('Script returned invalid musicUrl'))
 						}
@@ -348,17 +351,22 @@ const abortHttpRequest = (runtime: LxRuntime, requestKey: string, expected?: Htt
  */
 const handleHttpRequest = async (runtime: LxRuntime, reqData: RequestParams) => {
 	const { requestKey, url, options } = reqData
+	// No parent is valid during initialization. A supplied parent must still own
+	// a live business request, including HTTP emitted after timeout/cancellation.
+	if (reqData.parentRequestKey != null && !runtime.pendingRequests.has(reqData.parentRequestKey)) {
+		sendAction('response', { requestKey, error: 'SOURCE_REQUEST_SETTLED', response: null })
+		return
+	}
 	const previous = runtime.pendingHttpRequests.get(requestKey)
 	if (previous) {
 		if (previous.timeout !== null) clearTimeout(previous.timeout)
 		previous.controller.abort()
 	}
 	const controller = new AbortController()
-	const request: HttpRequest = { controller, timeout: null }
+	const request: HttpRequest = { controller, timeout: null, parentRequestKey: reqData.parentRequestKey }
 	runtime.pendingHttpRequests.set(requestKey, request)
-	request.timeout = options.timeout > 0
-		? setTimeout(() => abortHttpRequest(runtime, requestKey, request), Math.min(options.timeout, 60000))
-		: null
+	const timeoutMs = Number.isFinite(options.timeout) && options.timeout > 0 ? Math.min(options.timeout, 60000) : 15000
+	request.timeout = setTimeout(() => abortHttpRequest(runtime, requestKey, request), timeoutMs)
 
 	try {
 		const fetchOptions: RequestInit = {
@@ -516,9 +524,19 @@ const requestViaScript = <T = string>(
 			reject(new Error('音源脚本未初始化或已销毁'))
 			return
 		}
-		const tx = runtime.sources?.tx
-		if (action === 'lyric' && (!tx || !tx.actions?.includes('lyric'))) {
-			reject(new Error('TX lyrics are not supported by this source'))
+		const platform = requestContext?.platform ?? 'tx'
+		const capability = runtime.sources?.[platform]
+		if (!capability || !capability.actions?.includes(action) || (action === 'musicUrl' && !capability.qualitys?.includes(quality))) {
+			reject(new Error(`${platform} ${action}/${quality} is not supported by this source`))
+			return
+		}
+		if (platform !== 'tx' && requestContext?.musicInfo?.source !== platform) {
+			reject(new Error('PLATFORM_MUSIC_INFO_REQUIRED'))
+			return
+		}
+		const signal = requestContext?.signal
+		if (signal?.aborted) {
+			reject(new Error('SOURCE_CANCELLED'))
 			return
 		}
 		const requestType = requestContext?.requestType ?? 'current'
@@ -536,25 +554,32 @@ const requestViaScript = <T = string>(
 			pending.reject(new Error(`${action} request timeout`))
 			rememberSettledRequestType(runtime, wireRequestKey, pending)
 		}, timeoutMs)
+		const abort = () => pending.reject(new Error('SOURCE_CANCELLED'))
 
 		const pending: PendingRequest = {
 			resolve: (result: unknown) => {
 				if (runtime.pendingRequests.get(wireRequestKey) !== pending) return
 				runtime.pendingRequests.delete(wireRequestKey)
 				clearTimeout(timeout)
+				signal?.removeEventListener('abort', abort)
 				resolve(result as T)
 			},
 			reject: (err: Error) => {
 				if (runtime.pendingRequests.get(wireRequestKey) !== pending) return
 				runtime.pendingRequests.delete(wireRequestKey)
 				clearTimeout(timeout)
+				signal?.removeEventListener('abort', abort)
 				reject(err)
+				for (const [key, request] of runtime.pendingHttpRequests) {
+					if (request.parentRequestKey === wireRequestKey) abortHttpRequest(runtime, key, request)
+				}
 			},
 			requestKey,
 			requestType,
 			action,
 		}
 		runtime.pendingRequests.set(wireRequestKey, pending)
+		signal?.addEventListener('abort', abort, { once: true })
 
 		logInfo(`${logPrefix} Sending ${action} request: ${title} - ${artist}`)
 
@@ -564,9 +589,9 @@ const requestViaScript = <T = string>(
 				requestKey: wireRequestKey,
 				data: {
 					action,
-					source: 'tx',
+					source: platform,
 					info: {
-						musicInfo: {
+						musicInfo: requestContext?.musicInfo ?? {
 							id: songmid,
 							songmid,
 							title,
@@ -574,7 +599,6 @@ const requestViaScript = <T = string>(
 							singer: artist,
 							artist,
 							source: 'tx',
-							hash: songmid,
 						},
 						requestContext: {
 							requestKey,
@@ -598,8 +622,8 @@ const runtimeMethods = (runtime: LxRuntime) => {
 			requestContext?: LxRequestContext) =>
 			requestViaScript(runtime, title, artist, songmid, quality, requestContext),
 		getLyric: tx && tx.actions?.includes('lyric')
-			? (title: string, artist: string, songmid: string) =>
-				requestViaScript<unknown>(runtime, title, artist, songmid, '', undefined, 'lyric')
+			? (title: string, artist: string, songmid: string, context?: LxRequestContext) =>
+				requestViaScript<unknown>(runtime, title, artist, songmid, '', context, 'lyric')
 			: undefined,
 	}
 }
@@ -649,6 +673,7 @@ export const reloadLxMusicScript = async (
 
 		return {
 			...musicApi,
+			scriptType: 'lxmusic',
 			...runtimeMethods(runtime),
 		}
 	} catch (err) {
@@ -656,6 +681,6 @@ export const reloadLxMusicScript = async (
 			`[lxMusicAdapter] Failed to reload lx-music script "${musicApi.name}":`,
 			err,
 		)
-		return musicApi
+		throw err
 	}
 }

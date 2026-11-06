@@ -1,8 +1,18 @@
 import axios from 'axios'
 import { songKey } from '../sourceIdentity'
+import { txSearchRequest } from './txSearch'
 
-type Candidate = { mid: string; title: string; artist: string; album: string; duration: number }
-const matches = new Map<string, { value: string | null; expires: number }>()
+type Candidate = {
+	mid: string
+	title: string
+	artist: string
+	album: string
+	duration: number
+	songId?: number
+	strMediaMid?: string
+	albumId?: string
+}
+const matches = new Map<string, { value: Candidate | null; expires: number }>()
 const normalize = (value: string) =>
 	(value || '')
 		.normalize('NFKC')
@@ -53,13 +63,27 @@ export function selectQQMatch(item: IMusic.IMusicItem, candidates: Candidate[]):
 	return mids.length === 1 ? mids[0] : null
 }
 
-export async function resolveQQMid(item: IMusic.IMusicItem, signal?: AbortSignal): Promise<string> {
+export async function resolveQQInfo(
+	item: IMusic.IMusicItem,
+	signal?: AbortSignal,
+): Promise<Candidate> {
+	if (signal?.aborted) throw new Error('SOURCE_CANCELLED')
 	const platform = (item.platform || '').trim().toLowerCase()
 	if (['', 'tx', 'qq', 'qqmusic'].includes(platform)) {
 		const mid = [item.songmid, item.id].find(
 			(value) => typeof value === 'string' && /^[a-z\d]{14}$/i.test(value),
 		)
-		if (mid) return mid
+		if (mid)
+			return {
+				mid,
+				title: item.title,
+				artist: item.artist,
+				album: item.album,
+				duration: item.duration,
+				songId: item.songId ?? (/^\d+$/.test(String(item.id)) ? Number(item.id) : undefined),
+				strMediaMid: item.strMediaMid || item.file?.media_mid,
+				albumId: item.albumMid || item.albummid,
+			}
 	}
 	const key = JSON.stringify([songKey(item), item.title, item.artist, item.album, item.duration])
 	const cached = matches.get(key)
@@ -67,22 +91,12 @@ export async function resolveQQMid(item: IMusic.IMusicItem, signal?: AbortSignal
 		if (!cached.value) throw new Error('QQ_MATCH_NOT_FOUND')
 		return cached.value
 	}
-	const response = await axios.post(
-		'https://u.y.qq.com/cgi-bin/musicu.fcg',
-		{
-			req_1: {
-				method: 'DoSearchForQQMusicDesktop',
-				module: 'music.search.SearchCgiService',
-				param: {
-					num_per_page: 20,
-					page_num: 1,
-					query: `${item.title} ${item.artist}`,
-					search_type: 0,
-				},
-			},
-		},
-		{ signal, timeout: 10000, headers: { referer: 'https://y.qq.com' } },
-	)
+	const txRequest = txSearchRequest(`${item.title} ${item.artist}`)
+	const response = await axios.post(txRequest.url, txRequest.data, {
+		signal,
+		timeout: 8000,
+		headers: txRequest.headers,
+	})
 	const result = response.data?.req_1
 	const list = result?.data?.body?.song?.list
 	if (
@@ -91,19 +105,25 @@ export async function resolveQQMid(item: IMusic.IMusicItem, signal?: AbortSignal
 		!Array.isArray(list)
 	)
 		throw new Error('QQ_SEARCH_FAILED')
-	const mid = selectQQMatch(
-		item,
-		list.map((song) => ({
-			mid: String(song.mid || song.songmid || ''),
-			title: song.title || song.songname || '',
-			artist: (song.singer || []).map((singer: { name: string }) => singer.name).join(', '),
-			album: song.album?.title || song.albumname || '',
-			duration: Number(song.interval || 0),
-		})),
-	)
+	const candidates: Candidate[] = list.map((song) => ({
+		mid: String(song.mid || song.songmid || ''),
+		title: song.title || song.songname || '',
+		artist: (song.singer || []).map((singer: { name: string }) => singer.name).join(', '),
+		album: song.album?.name || song.album?.title || song.albumname || '',
+		duration: Number(song.interval || 0),
+		songId: song.id,
+		strMediaMid: song.file?.media_mid,
+		albumId: song.album?.mid,
+	}))
+	const mid = selectQQMatch(item, candidates)
+	const info = candidates.find((candidate) => candidate.mid === mid) ?? null
 	if (signal?.aborted) throw new Error('SOURCE_CANCELLED')
-	matches.set(key, { value: mid, expires: Date.now() + (mid ? 86400000 : 60000) })
+	matches.set(key, { value: info, expires: Date.now() + (info ? 86400000 : 60000) })
 	if (matches.size > 300) matches.delete(matches.keys().next().value!)
-	if (!mid) throw new Error('QQ_MATCH_NOT_FOUND')
-	return mid
+	if (!info) throw new Error('QQ_MATCH_NOT_FOUND')
+	return info
+}
+
+export async function resolveQQMid(item: IMusic.IMusicItem, signal?: AbortSignal): Promise<string> {
+	return (await resolveQQInfo(item, signal)).mid
 }

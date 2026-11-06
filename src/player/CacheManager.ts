@@ -68,7 +68,15 @@ export async function findCachedPath(
 		item.platform && item.id
 			? `${item.platform}_${item.id}`
 			: `${sanitizeFilename(item.title)}-${sanitizeFilename(item.artist)}`
-	const paths = [getLocalFilePath(item, identity), `${cacheDir}${legacyName}.${format}`]
+	// Legacy files have no resolver platform. Never reuse one for a cross-platform fallback.
+	const paths = [getLocalFilePath(item, identity)]
+	let resolutionPlatform = 'tx'
+	try {
+		resolutionPlatform = JSON.parse(identity.sourceId)[3] ?? 'tx'
+	} catch {
+		// Legacy cache identities predate the JSON platform field and refer to tx.
+	}
+	if (resolutionPlatform === 'tx') paths.push(`${cacheDir}${legacyName}.${format}`)
 	for (const path of paths) {
 		// Old filenames never escaped platform/id. Never let a legacy probe traverse directories.
 		if (/[\\/]/.test(path.slice(cacheDir.length))) continue

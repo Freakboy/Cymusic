@@ -4,6 +4,8 @@
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { once } from 'node:events'
+import { readFileSync } from 'node:fs'
+import vm from 'node:vm'
 import { createSourceFixture, assertRetired, deferred, flush, script } from './source-runtime-fixture.mjs'
 
 const checks = []
@@ -132,7 +134,7 @@ await test('same business request key has distinct attempts and unchanged script
 		assert.deepEqual(sent.data.data.info.requestContext, { requestKey: 'shared', requestType })
 		assert.deepEqual(sent.data.data.info.musicInfo, {
 			id: 'song', songmid: 'song', title: 'Title', name: 'Title', singer: 'Artist',
-			artist: 'Artist', source: 'tx', hash: 'song',
+			artist: 'Artist', source: 'tx',
 		})
 	}
 	f.clock.advance(10)
@@ -174,7 +176,7 @@ await test('runtime replacement rejects old music once and an old API cannot cal
 	await current.done
 	assert.equal(current.value, 'https://example.test/new')
 	const runtime = f.adapter.inspectRuntime()
-	const timed = observe(apiB.getMusicUrl('timed', '', '', '', { timeoutMs: 1 }))
+	const timed = observe(apiB.getMusicUrl('timed', '', '', '128k', { timeoutMs: 1 }))
 	f.clock.advance(1); await timed.done
 	assert.equal(runtime.settledRequestTypes.size, 1)
 	f.facade.destroy(); f.facade.destroy()
@@ -228,6 +230,116 @@ await test('HTTP same-key replacement owns its controller/timeout through late c
 	assert.equal(f.native.sent[0].data.error, null)
 	assert.equal(f.clock.timers.size, 0)
 	f.facade.destroy()
+})
+
+await test('business cancellation/timeout rejects late child HTTP, while initialization HTTP has a bounded default', async () => {
+	for (const ending of ['abort', 'timeout']) {
+		const work = []
+		const f = createSourceFixture({fetch: (_url, options) => { const pending = deferred(); work.push({...pending, options}); return pending.promise }})
+		const ready = f.adapter.adaptLxMusicScript('/** @name init-http */\nlx.on(lx.EVENT_NAMES.request, () => {})')
+		f.native.emit('request', request('init', {timeout:0}))
+		assert.equal(work.length, 1, 'Unparented initialization HTTP must remain allowed')
+		assert.equal([...f.clock.timers.values()].some(timer => timer.delay === 15000), true)
+		work[0].resolve(new Response('init'))
+		await flush()
+		f.native.init(undefined, {info:{sources:{tx:{type:'music',actions:['musicUrl'],qualitys:['128k']}}}})
+		const api = await ready, controller = new AbortController()
+		const result = observe(api.getMusicUrl('Title','Artist','mid','128k',{signal:controller.signal,timeoutMs:10}))
+		const parentRequestKey = f.native.sent.at(-1).data.requestKey
+		f.native.emit('request', {...request('child',{timeout:0}), parentRequestKey})
+		assert.equal(work.length, 2)
+		if (ending === 'abort') controller.abort()
+		else f.clock.advance(10)
+		await result.done
+		assert.equal(result.status,'rejected')
+		assert.equal(work[1].options.signal.aborted,true)
+		assert.equal(f.adapter.inspectRuntime().pendingHttpRequests.size,0)
+		f.native.emit('request', {...request('late'),parentRequestKey})
+		assert.equal(work.length,2,'Late parented request must not fetch')
+		assert.equal(f.native.sent.at(-1).data.error,'SOURCE_REQUEST_SETTLED')
+		f.native.emit('request', request('default',{timeout:undefined}))
+		assert.equal(work.length,3)
+		f.clock.advance(15000)
+		assert.equal(work[2].options.signal.aborted,true)
+		assert.equal(f.adapter.inspectRuntime().pendingHttpRequests.size,0)
+		work[1].reject(new Error('late aborted child'))
+		work[2].reject(new Error('late default timeout'))
+		await flush()
+		f.facade.destroy()
+		assert.equal(f.clock.timers.size,0)
+	}
+})
+
+await test('both real preload VMs propagate wire parents through async HTTP and host cancellation', async () => {
+	for (const filename of ['ios/CyMusic/user-api-preload.js', 'src/helpers/userApi/user-api-preload.js']) {
+		for (const ending of ['abort', 'timeout']) {
+			const work = [], events = []
+			const f = createSourceFixture({ fetch: (url, options) => {
+				const pending = deferred()
+				work.push({ ...pending, url, options })
+				return pending.promise
+			} })
+			const ready = f.adapter.adaptLxMusicScript(script('VM HTTP'))
+			const context = vm.createContext({ __lx_native_call__: (_key, action, json) => {
+				const data = JSON.parse(json)
+				events.push({ action, data })
+				f.native.emit(action, data)
+			} })
+			vm.runInContext(readFileSync(new URL('../' + filename, import.meta.url), 'utf8'), context)
+			const send = f.native.sendAction.bind(f.native)
+			f.native.sendAction = (action, data, generation) => {
+				send(action, data, generation)
+				context.__lx_native__('key', action, data)
+			}
+			vm.runInContext(`lx_setup('key', 'id', 'fixture', '', '', '', '', '');
+				const api = globalThis.lx || globalThis.lxu;
+				api.request('https://example.test/init', {}, () => {});
+				api.on(api.EVENT_NAMES.request, async () => {
+					await Promise.resolve();
+					api.request('https://example.test/child', {}, () => {});
+					await new Promise(resolve => { globalThis.resume = resolve });
+					api.request('https://example.test/late', {}, () => {});
+					return 'https://example.test/audio';
+				});
+				api.send(api.EVENT_NAMES.inited, { sources: {
+					tx: { type: 'music', actions: ['musicUrl'], qualitys: ['128k'] }
+				} });`, context)
+			const api = await ready
+			assert.equal(events.find(event => event.action === 'request').data.parentRequestKey, undefined)
+			assert.equal(work.length, 1, 'Initialization HTTP must be usable without a parent')
+			f.clock.advance(14999)
+			assert.equal(work[0].options.signal.aborted, false)
+			f.clock.advance(1)
+			assert.equal(work[0].options.signal.aborted, true, 'Omitted timeout defaults to 15s')
+			const controller = new AbortController()
+			const result = observe(api.getMusicUrl('Title', 'Artist', 'mid', '128k', {
+				requestKey: 'business-key', requestType: 'preload', signal: controller.signal, timeoutMs: 50,
+			}))
+			const wire = f.native.sent.at(-1).data.requestKey
+			await flush()
+			const child = events.filter(event => event.action === 'request').at(-1).data
+			assert.equal(child.parentRequestKey, wire)
+			assert.notEqual(wire, 'business-key')
+			assert.equal(child.requestType, 'preload')
+			assert.equal(work.length, 2)
+			if (ending === 'abort') controller.abort()
+			else f.clock.advance(50)
+			await result.done
+			assert.equal(result.status, 'rejected')
+			assert.equal(work[1].options.signal.aborted, true)
+			assert.equal(f.adapter.inspectRuntime().pendingHttpRequests.size, 0)
+			vm.runInContext('resume()', context)
+			await flush()
+			const late = events.filter(event => event.action === 'request').at(-1).data
+			assert.equal(late.parentRequestKey, wire)
+			assert.equal(work.length, 2, 'Late HTTP from timed-out/cancelled VM handler must not fetch')
+			assert.equal(f.native.sent.find(event => event.data.requestKey === late.requestKey).data.error, 'SOURCE_REQUEST_SETTLED')
+			for (const pending of work) pending.reject(new Error('late transport rejection'))
+			await flush()
+			f.facade.destroy()
+			assert.equal(f.clock.timers.size, 0)
+		}
+	}
 })
 
 await test('direct destroy clears actual HTTP maps/timers and ignores delayed body and finally', async () => {

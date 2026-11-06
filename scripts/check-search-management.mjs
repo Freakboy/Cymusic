@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
+import { createSourceFixture, script as lxScript } from './source-runtime-fixture.mjs'
 
 const deferred = () => {
 	let resolve, reject
@@ -394,9 +395,10 @@ function load(path, imports, timers = clock()) {
 	assert.equal(list().hasMore, false)
 }
 
-// Source operations: metadata-only lx import, current-only test, serial lock and timeout.
+// Source operations: metadata-only lx import, unselected isolation, serial lock and timeout.
 {
-	const timers = clock()
+	const fixture = createSourceFixture()
+	const timers = fixture.clock
 	const store = (value) => ({
 		getValue: () => value,
 		setValue: (next) => {
@@ -408,11 +410,7 @@ function load(path, imports, timers = clock()) {
 		resolving = store(null)
 	const saved = new Map(),
 		added = []
-	const adapter = load('src/helpers/userApi/lxMusicSourceAdapter.ts', {
-		'@/components/utils/nativeModules/userApi': {},
-		buffer: { Buffer },
-		'../logger': {},
-	})
+	const adapter = fixture.adapter
 	const factory = load('src/helpers/userApi/importMusicSource.ts', {
 		'./lxMusicSourceAdapter': adapter,
 	})
@@ -422,12 +420,16 @@ function load(path, imports, timers = clock()) {
 		httpStatus = 200
 	// Share the production queue with simulated playback, rather than running tasks inline.
 	const runtime = load('src/player/sourceResolver/runtime.ts', {
-		'@/helpers/userApi/lxMusicSourceAdapter': {},
-	})
+		'@/helpers/userApi/lxMusicSourceAdapter': adapter,
+	}, timers)
 	const helper = load(
 		'src/helpers/sourceManagement.ts',
 		{
-			'@/player/MusicSourceResolver': runtime,
+			'@/player/sourceResolver/runtime': runtime,
+			'@/player/sourceResolver/platforms': {
+				RESOLUTION_PLATFORMS: ['tx', 'wy', 'kg', 'kw', 'mg'],
+				resolvePlatformMusicInfo: async (_item, platform) => ({ source: platform, songmid: platform === 'tx' ? '004IArbh3ytHgR' : 123 }),
+			},
 			fetch: async (url, options) => {
 				requests.push({ url, options })
 				return { ok: httpStatus === 200, status: httpStatus, text: async () => response }
@@ -520,84 +522,169 @@ function load(path, imports, timers = clock()) {
 	await assert.rejects(helper.fetchManagedSourceScript('file:///source.js'), /HTTP\(S\)/)
 	helper.saveSourceList([{ id: 'disabled', enabled: false }])
 	assert.equal(saved.get('music.musicApi'), sources.getValue())
-	const messages = { busy: 'busy', currentOnly: 'current only' }
-	await assert.rejects(helper.testCurrentSource('other', messages), /current only/)
+	await assert.rejects(helper.testSourceChannels('missing', 'busy'), /SOURCE_NOT_FOUND/)
+	selected.setValue({ id: 'current' })
 	resolving.setValue('track')
-	await assert.rejects(helper.testCurrentSource('current', messages), /busy/)
+	await assert.rejects(helper.testSourceChannels('current', 'busy'), /busy/)
 	resolving.setValue(null)
-	const request = deferred()
 	const playback = deferred()
-	let resolverCalls = 0
 	const playing = runtime.withSourceRuntimeLock(() => playback.promise)
-	selected.setValue({
-		id: 'current',
-		getMusicUrl: () => {
-			resolverCalls++
-			return request.promise
-		},
-	})
-	const result = helper.testCurrentSource('current', messages)
+	const unselected = {
+		id: 'other',
+		script: 'let calls = 0; module.exports = { getMusicUrl: async () => ++calls === 1 ? { url: "https://audio.test/isolated", headers: { Referer: "test" } } : null }',
+		getMusicUrl: () => { throw new Error('must not execute selected closure') },
+	}
+	const current = { id: 'current', getMusicUrl: () => 'https://audio.test/playback' }
+	selected.setValue(current)
+	sources.setValue([current, unselected])
+	const sourceSnapshot = sources.getValue()
+	const savedSnapshot = saved.get('music.musicApi')
+	const result = helper.testSourceChannels('other', 'busy')
+	let testSettled = false
+	void result.then(() => { testSettled = true })
 	await flush()
-	assert.equal(resolverCalls, 0, 'Testing must wait for the active playback resolver')
+	await assert.rejects(helper.testSourceChannels('other', 'busy'), /busy/)
+	assert.equal(testSettled, false, 'Diagnostics must wait for the playback runtime lock')
 	playback.resolve()
 	await playing
-	await flush()
-	assert.equal(resolverCalls, 1)
-	await assert.rejects(helper.testCurrentSource('current', messages), /busy/)
-	timers.advance(15000)
-	await assert.rejects(result, /timeout/)
-	assert.throws(() => helper.assertSourceIdle('busy'), /busy/)
-	let nextPlayback = false
-	const queued = runtime.withSourceRuntimeLock(async () => {
-		nextPlayback = true
-	})
-	await flush()
-	assert.equal(nextPlayback, false, 'UI timeout must not release the runtime lock')
-	request.resolve('https://audio.test/song.mp3')
-	await queued
-	await flush()
-	assert.equal(nextPlayback, true)
+	const results = await result
+	assert.equal(results[0].urlResolved, true)
+	assert.equal(results[0].state, 'undeclared')
+	assert.equal(results.every(channel => channel.playbackVerified === false), true)
+	assert.equal(results.slice(1).every(channel => channel.state === 'undeclared' && !channel.urlResolved), true)
+	assert.equal(selected.getValue(), current)
+	assert.equal(await current.getMusicUrl(), 'https://audio.test/playback')
+	assert.equal(sources.getValue(), sourceSnapshot)
+	assert.equal(saved.get('music.musicApi'), savedSnapshot)
+	const repeated = await helper.testSourceChannels('other', 'busy')
+	assert.equal(repeated[0].urlResolved, true, 'Each test must execute a fresh script closure')
 	helper.assertSourceIdle('busy')
-	selected.setValue({ id: 'current', getMusicUrl: async () => 'file:///not-a-remote-url' })
-	await assert.rejects(helper.testCurrentSource('current', messages), /Invalid audio URL/)
-	selected.setValue({ id: 'current', getMusicUrl: async () => 'https://audio.test/song.mp3' })
-	await helper.testCurrentSource('current', messages)
-	assert.equal(selected.getValue().id, 'current')
+	const multi = {
+		id: 'multi',
+		script: `module.exports = {
+			sources: {
+				tx: { actions: ['musicUrl'], qualitys: ['128k'] },
+				wy: { actions: ['musicUrl'], qualitys: ['320k'] },
+				kg: false,
+				mg: { actions: ['musicUrl'], qualitys: ['flac'] }
+			},
+			getMusicUrl: async (_title, _artist, mid, quality, context) => {
+				if (context.musicInfo.source !== context.platform) throw new Error('WRONG_PLATFORM')
+				if (context.platform === 'wy') throw new Error('WY_OFFLINE')
+				if (context.platform === 'tx' && (mid !== '004IArbh3ytHgR' || quality !== '128k')) throw new Error('WRONG_TX')
+				if (context.platform === 'mg' && (mid !== '' || quality !== 'flac')) throw new Error('WRONG_MG')
+				return 'https://audio.test/' + context.platform
+			}
+		}`,
+	}
+	sources.setValue([current, multi])
+	const multiResults = await helper.testSourceChannels(multi.id, 'busy')
+	assert.deepEqual(Array.from(multiResults, ({ id, state, urlResolved }) => [id, state, urlResolved]), [
+		['tx', 'supported', true], ['wy', 'failed', false], ['kg', 'unsupported', false],
+		['kw', 'undeclared', false], ['mg', 'supported', true],
+	])
+	assert.match(multiResults[1].error, /^(?:Error: )?WY_OFFLINE$/)
+	assert.ok(multiResults.every((channel) => channel.playbackVerified === false))
+	assert.equal(selected.getValue(), current)
+	assert.equal(saved.get('music.musicApi'), savedSnapshot)
 	for (const changed of ['selection', 'loading']) {
 		const blocked = deferred()
 		const holding = runtime.withSourceRuntimeLock(() => blocked.promise)
-		let called = false
-		selected.setValue({
-			id: 'current',
-			getMusicUrl: async () => {
-				called = true
-				return 'https://audio.test/song.mp3'
-			},
-		})
-		const waiting = helper.testCurrentSource('current', messages)
-		if (changed === 'selection') selected.setValue({ id: 'other' })
+		const waiting = helper.testSourceChannels(multi.id, 'busy')
+		const replacement = { id: 'replacement', getMusicUrl: () => 'https://audio.test/replacement' }
+		if (changed === 'selection') selected.setValue(replacement)
 		else resolving.setValue('playback')
-		const rejected = assert.rejects(waiting, /busy/)
+		const checked = changed === 'loading'
+			? assert.rejects(waiting, /busy/)
+			: waiting.then((results) => {
+				assert.equal(results[0].urlResolved, true)
+				assert.equal(selected.getValue(), replacement, 'Queued tests must preserve the latest selection')
+			})
 		blocked.resolve()
 		await holding
-		await rejected
-		assert.equal(
-			called,
-			false,
-			'Queued tests must recheck selection and playback loading under the lock',
-		)
+		await checked
 		resolving.setValue(null)
 		helper.assertSourceIdle('busy')
 	}
+	sources.setValue([])
+	selected.setValue({ id: 'current', script: 'module.exports = { sources: {tx: {actions:["musicUrl"],qualitys:["128k"]}, wy: false}, getMusicUrl: async () => "file:///invalid" }' })
+	const failed = await helper.testSourceChannels('current', 'busy')
+	assert.equal(failed[0].state, 'failed')
+	assert.equal(failed[1].state, 'unsupported')
+	assert.equal(failed[0].error, 'INVALID_AUDIO_URL')
+	selected.setValue({ id: 'current', script: 'module.exports = {getMusicUrl: () => new Promise(() => {})}' })
+	const timeout = helper.testSourceChannels('current', 'busy')
+	await flush()
+	timers.advance(5000)
+	assert.match((await timeout)[0].error, /^(?:Error: )?SOURCE_REQUEST_TIMEOUT$/)
+	helper.assertSourceIdle('busy')
+	assert.equal(await runtime.withSourceRuntimeLock(async () => true), true)
+
+	// Use the actual adapter and native event fixture to verify singleton restoration.
+	const loadedCurrent = await fixture.initialized('playback')
+	selected.setValue(loadedCurrent)
+	const otherLx = { id: 'other-lx', scriptType: 'lxmusic', script: lxScript('diagnostic') }
+	sources.setValue([loadedCurrent, otherLx])
+	const lxSnapshot = sources.getValue()
+	const loadCount = fixture.native.loads.length
+	const diagnostic = helper.testSourceChannels(otherLx.id, 'busy')
+	await flush()
+	assert.equal(fixture.native.loads.length, loadCount + 1)
+	fixture.native.init(undefined, { info: { sources: {
+		tx: { type: 'music', actions: ['musicUrl'], qualitys: ['128k'] }, wy: false,
+	} } })
+	await flush()
+	const request = fixture.native.sent.at(-1)
+	assert.equal(request.action, 'request')
+	fixture.native.emit('response', {
+		requestKey: request.data.requestKey, status: true,
+		result: { action: 'musicUrl', data: { url: 'https://audio.test/lx-test' } },
+	})
+	await flush()
+	assert.equal(fixture.native.loads.length, loadCount + 2, 'Selected lx runtime must be reloaded after diagnostics')
+	assert.equal(fixture.native.loads.at(-1).info.script, loadedCurrent.script)
+	fixture.native.init(undefined, { info: { sources: {
+		tx: { type: 'music', actions: ['musicUrl'], qualitys: ['128k'] },
+	} } })
+	assert.equal((await diagnostic)[0].urlResolved, true)
+	const restored = selected.getValue()
+	assert.equal(restored.id, loadedCurrent.id)
+	assert.notEqual(restored, loadedCurrent)
+	assert.equal(sources.getValue(), lxSnapshot)
+	assert.equal(saved.get('music.musicApi'), savedSnapshot)
+	const resumed = runtime.withSourceRuntimeLock(() => runtime.requestSourceUrl(
+		restored, 'Song', 'Artist', 'mid', '128k', { platform: 'tx', timeoutMs: 5000 },
+	))
+	await flush()
+	const resumedRequest = fixture.native.sent.at(-1)
+	assert.equal(resumedRequest.generation, fixture.native.loads.at(-1).generation)
+	fixture.native.emit('response', {
+		requestKey: resumedRequest.data.requestKey, status: true,
+		result: { action: 'musicUrl', data: { url: 'https://audio.test/resumed' } },
+	})
+	const resumedUrl = await resumed
+	assert.equal(typeof resumedUrl === 'string' ? resumedUrl : resumedUrl.url, 'https://audio.test/resumed')
+	runtime.releaseResolverRuntime()
+	helper.assertSourceIdle('busy')
 }
-// Management screen: exercise actual buttons, including disabled affordances.
-{
+// Management screen: exercise native menu actions and their disabled/hidden affordances.
+if (!process.argv.includes('--helpers-only')) {
 	const labels = load('src/locales/sourceSearch.ts', {
 		'@/utils/i18n': { nowLanguage: { useValue: () => 'en' } },
 	}).useSourceSearchText()
-	const sources = [
-		{ id: 'current', enabled: true, importUrl: 'https://scripts.test/source.js' },
-		{ id: 'other', enabled: true, srcUrl: 'https://homepage.test' },
+	let sources = [
+		{ id: 'current', name: 'Current', enabled: true, importUrl: 'https://scripts.test/source.js' },
+		{ id: 'other', name: 'Other', enabled: true, srcUrl: 'https://homepage.test' },
+	]
+	let selected = sources[0]
+	let pendingTest
+	const alerts = []
+	const channelResults = [
+		{ id: 'tx', state: 'supported', urlResolved: true },
+		{ id: 'wy', state: 'failed', urlResolved: false, error: 'WY_OFFLINE' },
+		{ id: 'kg', state: 'unsupported', urlResolved: false },
+		{ id: 'kw', state: 'undeclared', urlResolved: false },
+		{ id: 'mg', state: 'supported', urlResolved: true },
 	]
 	let cursor = 0,
 		tree
@@ -606,29 +693,52 @@ function load(path, imports, timers = clock()) {
 	const jsx = (type, props) => ({ type, props })
 	const Screen = load('src/app/(modals)/sourceManagement.tsx', {
 		'@/constants/tokens': {},
+		'@expo/vector-icons': { Ionicons: 'Ionicons' },
+		'@react-native-menu/menu': { MenuView: 'MenuView' },
 		'@/helpers/trackPlayerIndex': {
-			setMusicApiAsSelectedById: async (id) => calls.push(['reload', id]),
+			setMusicApiAsSelectedById: async (id) => {
+				calls.push(['select/reload', id])
+				selected = sources.find((source) => source.id === id)
+			},
+			deleteMusicApiById: (id) => {
+				calls.push(['delete', id])
+				sources = sources.filter((source) => source.id !== id)
+			},
 		},
 		'@/helpers/sourceManagement': {
 			describeSourceChannels: () =>
 				['tx', 'wy', 'kg', 'kw', 'mg'].map((id) => ({ id, state: 'undeclared', qualitys: [] })),
 			assertSourceIdle() {},
+			saveSourceList: (next) => {
+				calls.push(['save', Array.from(next, (source) => [source.id, source.enabled])])
+				sources = next
+			},
 			fetchManagedSourceScript: async (url) => {
 				calls.push(['fetch', url])
 				return 'script'
 			},
 			importManagedSource: async (...args) => calls.push(['import', ...args]),
 			updateManagedSource: async (...args) => calls.push(['update', ...args]),
-			testCurrentSource: async (id) => calls.push(['test', id]),
+			testSourceChannels: (id, busy) => {
+				calls.push(['test', id, busy])
+				pendingTest = deferred()
+				return pendingTest.promise
+			},
 		},
 		'@/hooks/useAppTheme': { useThemeColors: () => ({}) },
 		'@/locales/sourceSearch': { useSourceSearchText: () => labels },
 		'@/player/PlayerStore': {
-			musicApiStore: { useValue: () => sources },
-			musicApiSelectedStore: { useValue: () => sources[0] },
+			musicApiStore: { useValue: () => sources, getValue: () => sources },
+			musicApiSelectedStore: { useValue: () => selected, getValue: () => selected },
 		},
-		'expo-document-picker': {},
-		'expo-file-system': {},
+		'expo-document-picker': { getDocumentAsync: async (options) => {
+			calls.push(['pick', options])
+			return { canceled: false, assets: [{ uri: 'file:///source.js' }] }
+		} },
+		'expo-file-system': { File: class {
+			constructor(uri) { assert.equal(uri, 'file:///source.js') }
+			async text() { return 'file script' }
+		} },
 		'expo-router': { Stack: { Screen: 'Screen' }, router: {} },
 		react: {
 			useMemo: (fn) => fn(),
@@ -657,7 +767,10 @@ function load(path, imports, timers = clock()) {
 				'View',
 			]
 				.map((name) => [name, name])
-				.concat([['StyleSheet', { create: (s) => s }]]),
+				.concat([
+					['StyleSheet', { create: (s) => s }],
+					['Alert', { alert: (...args) => alerts.push(args) }],
+				]),
 		),
 		'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
 	}).default
@@ -673,22 +786,106 @@ function load(path, imports, timers = clock()) {
 		nodes(tree).filter(
 			(node) => node.type === 'Pressable' && node.props.children?.props?.children === label,
 		)
+	const menu = (id) => {
+		const index = sources.findIndex((source) => source.id === id)
+		assert.ok(index >= 0, `Source ${id} must be rendered`)
+		const node = nodes(tree).filter((node) => node.type === 'MenuView')[index]
+		assert.ok(node, `Source ${id} must expose a native menu`)
+		assert.equal(node.props.children.props.disabled, false)
+		assert.equal(node.props.children.props.accessibilityLabel, `${sources[index].name}: ${labels.more}`)
+		return node
+	}
+	const action = (id, event) => {
+		const item = menu(id).props.actions.find((item) => item.id === event)
+		assert.ok(item, `Menu must contain ${event} for ${id}`)
+		return item
+	}
+	const pressAction = async (id, event) => {
+		const item = action(id, event)
+		assert.ok(!item.attributes?.disabled, `${event} must be enabled for ${id}`)
+		assert.ok(!item.attributes?.hidden, `${event} must be visible for ${id}`)
+		menu(id).props.onPressAction({ nativeEvent: { event } })
+		await flush()
+		render()
+	}
+	const toggle = async (id, value) => {
+		const node = nodes(tree).find((node) => node.type === 'Switch' &&
+			node.props.accessibilityLabel === `${sources.find((source) => source.id === id).name}: ${labels.enabled}`)
+		assert.equal(node.props.disabled, false)
+		node.props.onValueChange(value)
+		await flush()
+		render()
+	}
 	render()
-	assert.deepEqual(
-		buttons(labels.test).map((node) => node.props.disabled),
-		[false, true],
-	)
-	assert.deepEqual(
-		buttons(labels.reload).map((node) => node.props.disabled),
-		[false, true],
-	)
-	assert.equal(buttons(labels.update).length, 1, 'Homepage-only sources must not offer URL updates')
-	buttons(labels.reload)[0].props.onPress()
-	await flush()
-	assert.deepEqual(calls.shift(), ['reload', 'current'])
-	buttons(labels.update)[0].props.onPress()
-	await flush()
+	for (const id of ['current', 'other']) {
+		assert.deepEqual(Array.from(menu(id).props.actions, (item) => item.id),
+			['capabilities', 'select', 'reload', 'update', 'test', 'up', 'down', 'delete'])
+		assert.equal(action(id, 'test').attributes.disabled, false, 'Unselected enabled sources can be tested')
+	}
+	assert.equal(action('current', 'select').attributes.disabled, true)
+	assert.equal(action('current', 'select').state, 'on')
+	assert.equal(action('other', 'select').attributes.disabled, false)
+	assert.equal(action('current', 'reload').attributes.disabled, false)
+	assert.equal(action('other', 'reload').attributes.disabled, true)
+	assert.equal(action('current', 'up').attributes.disabled, true)
+	assert.equal(action('other', 'down').attributes.disabled, true)
+	assert.equal(action('other', 'update').attributes.hidden, true, 'Homepage is not an import URL')
+	await pressAction('current', 'capabilities')
+	const capabilityAlert = alerts.shift()
+	assert.equal(capabilityAlert[0], 'Current')
+	for (const name of ['channelTx', 'channelWy', 'channelKg', 'channelKw', 'channelMg'])
+		assert.ok(capabilityAlert[1].includes(`${labels[name]}: ${labels.undeclared}`))
+	await pressAction('current', 'reload')
+	assert.deepEqual(calls.shift(), ['select/reload', 'current'])
+	await pressAction('current', 'update')
 	assert.deepEqual(calls.shift(), ['update', 'current', labels.busy])
+	await pressAction('other', 'test')
+	assert.deepEqual(calls.shift(), ['test', 'other', labels.busy])
+	assert.equal(selected.id, 'current', 'Testing an unselected source must not select it')
+	assert.ok(nodes(tree).some((node) => node.type === 'Text' && node.props.children === labels.testing))
+	assert.equal(buttons(labels.importFile)[0].props.disabled, true)
+	assert.ok(nodes(tree).filter((node) => node.type === 'Switch').every((node) => node.props.disabled))
+	for (const node of nodes(tree).filter((node) => node.type === 'MenuView')) {
+		assert.equal(node.props.children.props.disabled, true)
+		assert.ok(node.props.actions.filter((item) => item.id !== 'capabilities').every((item) => item.attributes.disabled))
+		node.props.onPressAction({ nativeEvent: { event: 'delete' } })
+	}
+	assert.equal(alerts.length, 0, 'Busy menus must ignore events')
+	pendingTest.resolve(channelResults)
+	await flush()
+	render()
+	const summary = [
+		`${labels.channelTx}: ${labels.resolved}`,
+		`${labels.channelWy}: ${labels.failed} (WY_OFFLINE)`,
+		`${labels.channelKg}: ${labels.unsupported}`,
+		`${labels.channelKw}: ${labels.undeclared}`,
+		`${labels.channelMg}: ${labels.resolved}`,
+	].join('\n')
+	assert.ok(nodes(tree).some((node) => node.type === 'Text' && node.props.children === summary),
+		'Each platform must show its own success, failure, unsupported or unknown result')
+	await toggle('current', false)
+	assert.equal(sources[0].enabled, true)
+	assert.ok(nodes(tree).some((node) => node.props.accessibilityRole === 'alert' &&
+		[node.props.children].flat().includes(labels.disableSelected)))
+	assert.equal(calls.length, 0)
+	await toggle('other', false)
+	assert.deepEqual(calls.shift(), ['save', [['current', true], ['other', false]]])
+	assert.equal(action('other', 'test').attributes.disabled, true)
+	assert.equal(action('other', 'select').attributes.disabled, true)
+	assert.ok(nodes(tree).some((node) => node.type === 'Pressable' &&
+		node.props.accessibilityLabel === `Other: ${labels.select}` && node.props.disabled))
+	await toggle('other', true)
+	assert.deepEqual(calls.shift(), ['save', [['current', true], ['other', true]]])
+	await pressAction('other', 'select')
+	assert.deepEqual(calls.shift(), ['select/reload', 'other'])
+	assert.equal(selected.id, 'other')
+	assert.equal(action('other', 'select').state, 'on')
+	assert.equal(action('current', 'reload').attributes.disabled, true)
+	await pressAction('current', 'down')
+	assert.deepEqual(calls.shift(), ['save', [['other', true], ['current', true]]])
+	assert.equal(action('current', 'down').attributes.disabled, true)
+	await pressAction('current', 'up')
+	assert.deepEqual(calls.shift(), ['save', [['current', true], ['other', true]]])
 	nodes(tree)
 		.find((node) => node.type === 'TextInput')
 		.props.onChangeText(' https://scripts.test/new.js ')
@@ -699,7 +896,35 @@ function load(path, imports, timers = clock()) {
 	assert.deepEqual(calls.shift(), ['import', 'script', labels.busy, 'https://scripts.test/new.js'])
 	render()
 	assert.equal(buttons(labels.importUrl)[0].props.disabled, true)
+	buttons(labels.importFile)[0].props.onPress()
+	await flush()
+	const picked = calls.shift()
+	assert.equal(picked[0], 'pick')
+	assert.equal(picked[1].copyToCacheDirectory, true)
+	assert.equal(picked[1].multiple, false)
+	assert.deepEqual(calls.shift(), ['import', 'file script', labels.busy])
+	render()
+	await pressAction('current', 'delete')
+	assert.equal(action('current', 'delete').attributes.destructive, true)
+	let confirmation = alerts.shift()
+	assert.equal(confirmation[0], labels.delete)
+	assert.equal(confirmation[1], labels.confirmDelete)
+	assert.equal(confirmation[2].find((button) => button.style === 'cancel').text, labels.cancel)
+	assert.equal(sources.length, 2, 'Opening confirmation must not delete the source')
+	assert.equal(calls.length, 0)
+	// Dismiss once, then explicitly confirm a fresh deletion dialog.
+	await pressAction('current', 'delete')
+	confirmation = alerts.shift()
+	confirmation[2].find((button) => button.style === 'destructive').onPress()
+	await flush()
+	render()
+	assert.deepEqual(calls.shift(), ['delete', 'current'])
+	assert.deepEqual(Array.from(sources, (source) => source.id), ['other'])
+	assert.equal(nodes(tree).filter((node) => node.type === 'MenuView').length, 1)
+	assert.equal(calls.length, 0)
 }
 console.log(
-	'PASS: search transport and screens, stable metadata import, URL updates and failure preservation, management buttons, current-only resolver test and shared timeout lock',
+	process.argv.includes('--helpers-only')
+		? 'PASS: search transport, stable source import/update, isolated platform diagnostics, capability states and timeout queue release (management screen skipped)'
+		: 'PASS: search/source management including isolated diagnostics and management screen',
 )

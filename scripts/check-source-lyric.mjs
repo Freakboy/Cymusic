@@ -53,27 +53,45 @@ await test('LX publicly initialized sources survive adaptation and reload', asyn
 	f.facade.destroy()
 })
 
-await test('real SDK initialization filters online lyric declarations before the adapter sees them', async () => {
+await test('real SDK accepts TX lyrics and exposes a reachable adapter request with schema limits', async () => {
+	for (const filename of ['ios/CyMusic/user-api-preload.js', 'src/helpers/userApi/user-api-preload.js']) {
 	const events = []
 	const context = vm.createContext({ __lx_native_call__: (key, action, data) => {
 		events.push({ action, data: JSON.parse(data) })
 	} })
-	vm.runInContext(readFileSync(new URL('../ios/CyMusic/user-api-preload.js', import.meta.url), 'utf8'), context)
+	vm.runInContext(readFileSync(new URL('../' + filename, import.meta.url), 'utf8'), context)
 	vm.runInContext(`lx_setup('key', 'id', 'fixture', '', '', '', '', '');
-		lx.send(lx.EVENT_NAMES.inited, { sources: {
+		const api = globalThis.lx || globalThis.lxu;
+		api.on(api.EVENT_NAMES.request, async ({info}) => info.response);
+		api.send(api.EVENT_NAMES.inited, { sources: {
 			tx: { type: 'music', actions: ['musicUrl', 'lyric'], qualitys: ['128k'] },
+			wy: { type: 'music', actions: ['musicUrl', 'lyric'], qualitys: ['128k'] },
 			local: { type: 'music', actions: ['lyric'], qualitys: [] }
 		} });`, context)
 	const data = events.find(event => event.action === 'init').data
-	assert.deepEqual(data.info.sources.tx.actions, ['musicUrl'])
+	assert.deepEqual(data.info.sources.tx.actions, ['musicUrl', 'lyric'])
+	assert.deepEqual(data.info.sources.wy.actions, ['musicUrl'])
 	assert.deepEqual(data.info.sources.local.actions, ['lyric'])
 	const f = createSourceFixture()
 	const ready = f.adapter.adaptLxMusicScript('/** @name fixture */\nlx.on(lx.EVENT_NAMES.request, () => {})')
 	f.native.init(undefined, data)
 	const api = await ready
-	assert.equal(api.getLyric, undefined)
-	assert.equal(f.native.sent.length, 0)
+	assert.equal(typeof api.getLyric, 'function')
+	const response = api.getLyric('Title', 'Artist', 'mid')
+	const sent = f.native.sent.at(-1).data
+	context.__lx_native__('key', 'request', JSON.stringify({ ...sent, data: { ...sent.data, info: { ...sent.data.info, response: { lyric: 'original', tlyric: 'translated' } } } }))
+	await flush()
+	f.native.emit('response', events.find(event => event.action === 'response').data)
+	assert.deepEqual(await response, { lyric: 'original', tlyric: 'translated', rlyric: null, lxlyric: null })
+	for (const [index, value, valid] of [[0, null, false], [1, {lyric: 42}, false], [2, {lyric: 'x'.repeat(51200), tlyric:'x'.repeat(5120)}, true], [3, {lyric: 'x'.repeat(51201)}, false]]) {
+		context.__lx_native__('key', 'request', JSON.stringify({requestKey:`boundary-${index}`,data:{source:'tx',action:'lyric',info:{response:value}}}))
+		await flush()
+		const result = events.find(event => event.action === 'response' && event.data.requestKey === `boundary-${index}`).data
+		assert.equal(result.status, valid)
+		if (valid) assert.equal(result.result.data.tlyric, null)
+	}
 	f.facade.destroy()
+	}
 })
 
 await test('LX lyric event is exposed only for publicly accepted TX lyric capability', async () => {
@@ -182,7 +200,7 @@ await test('queued lyrics reject stale request tokens and changed source before 
 	}
 })
 
-await test('in-flight lyrics discard old source/token results and retain lock after timeout', async () => {
+await test('in-flight lyrics discard old source/token results and release lock at bounded timeout', async () => {
 	for (const change of ['token', 'source', 'timeout']) {
 		const f = lyricFixture(), work = deferred()
 		let current = true, called = false, nextRan = false
@@ -196,7 +214,8 @@ await test('in-flight lyrics discard old source/token results and retain lock af
 		else {
 			f.clock.advance(100)
 			assert.equal(await result, null)
-			assert.equal(nextRan, false, 'Timeout must not release the source runtime')
+			await queued
+			assert.equal(nextRan, true, 'Bounded lyric timeout must release the source runtime')
 		}
 		work.resolve({ lyric: 'late', tlyric: 'late translation' })
 		assert.equal(await result, null)
@@ -204,6 +223,43 @@ await test('in-flight lyrics discard old source/token results and retain lock af
 		assert.equal(nextRan, true)
 		assert.equal(f.clock.timers.size, 0)
 	}
+})
+
+await test('timed-out CommonJS lyrics observe late rejection and never block the next song', async () => {
+	const f = lyricFixture(), work = deferred()
+	f.select({id:'source',getLyric:()=>work.promise})
+	const result = f.helper.fetchSourceLyric(item, () => true, 50)
+	await flush()
+	const next = f.runtime.withSourceRuntimeLock(async () => 'next-song')
+	f.clock.advance(50)
+	assert.equal(await result, null)
+	assert.equal(await next, 'next-song')
+	work.reject(new Error('late rejection'))
+	await flush()
+	assert.equal(f.clock.timers.size, 0)
+})
+
+await test('lyric reload shares the deadline and a late loader cannot invoke the source', async () => {
+	const loading = deferred()
+	let calls = 0
+	const selected = { id: 'loading', scriptType: 'cymusic' }
+	const imports = { '@/player/PlayerStore': { musicApiSelectedStore: { getValue: () => selected } } }
+	const f = createSourceFixture({ imports })
+	const runtime = f.load('src/player/sourceResolver/runtime')
+	imports['@/player/sourceResolver/runtime'] = { ...runtime, loadResolverSource: () => loading.promise }
+	const result = f.load('src/helpers/sourceLyric').fetchSourceLyric(item, () => true, 50)
+	await flush()
+	let released = false
+	const next = runtime.withSourceRuntimeLock(async () => { released = true })
+	f.clock.advance(50)
+	assert.equal(await result, null)
+	await flush()
+	assert.equal(released, true, 'Reload must not strand the lyric lock after its deadline')
+	loading.resolve({ getLyric: () => { calls++; return 'late' } })
+	await next
+	await flush()
+	assert.equal(calls, 0)
+	assert.equal(f.clock.timers.size, 0)
 })
 
 console.log(JSON.stringify({ suite: 'source-lyric', checks }, null, 2))
