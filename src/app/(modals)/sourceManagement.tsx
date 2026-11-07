@@ -247,7 +247,11 @@ export default function SourceManagementScreen() {
 													const results = await testSourceChannels(source.id, text.busy)
 													const names = { tx: text.channelTx, wy: text.channelWy, kg: text.channelKg, kw: text.channelKw, mg: text.channelMg }
 													const summary = results.map((result) => {
-														const state = result.urlResolved ? text.resolved : result.state === 'failed' ? text.failed : text[result.state]
+														const state = result.urlResolved ? text.resolved
+															: result.failureStage === 'matching' ? text.sampleNotMatched
+															: result.failureStage === 'urlResolution' ? text.urlResolutionFailed
+															: result.failureStage === 'initialization' ? text.initializationFailed
+															: result.state === 'failed' ? text.failed : text[result.state]
 														return `${names[result.id]}: ${state}${result.error ? ` (${result.error})` : ''}`
 													}).join('\n')
 													setStatus((previous) => ({ ...previous, [source.id]: summary }))

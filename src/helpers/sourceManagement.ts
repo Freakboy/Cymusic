@@ -142,6 +142,7 @@ export type SourceChannelTestResult = {
 	qualitys: string[]
 	urlResolved: boolean
 	playbackVerified: false
+	failureStage?: 'initialization' | 'matching' | 'urlResolution'
 	error?: string
 }
 
@@ -161,30 +162,28 @@ export async function testSourceChannels(
 		return await withSourceRuntimeLock(async () => {
 			if (trackSourceLoadingStore.getValue()) throw new Error(busyMessage)
 			const selected = musicApiSelectedStore.getValue()
-			const item =
-				options.item ??
-				({
-					id: '003aAYrm3GE0Ac',
-					songmid: '003aAYrm3GE0Ac',
-					platform: 'tx',
-					title: '稻香',
-					artist: '周杰伦',
-					album: '魔杰座',
-					duration: 223,
-				} as IMusic.IMusicItem)
+			const defaultItem = {
+				id: '003aAYrm3GE0Ac',
+				songmid: '003aAYrm3GE0Ac',
+				platform: 'tx',
+				title: '稻香',
+				artist: '周杰伦',
+				album: '魔杰座',
+				duration: 223,
+			} as IMusic.IMusicItem
 			try {
 				let loaded: SourceMusicApi
 				try {
 					if (options.signal?.aborted) throw new Error('SOURCE_CANCELLED')
 					loaded = await loadResolverSource(source, true)
 				} catch (error) {
-					return RESOLUTION_PLATFORMS.map((id) => ({
-						id,
+					return describeSourceChannels(source).map((channel) => ({
+						...channel,
 						state: 'failed' as const,
-						declaredState: 'undeclared' as const,
-						qualitys: [],
+						declaredState: channel.state,
 						urlResolved: false,
 						playbackVerified: false as const,
+						failureStage: 'initialization' as const,
 						error: error instanceof Error ? error.message : String(error),
 					}))
 				}
@@ -203,8 +202,22 @@ export async function testSourceChannels(
 						(channel.state === 'undeclared' && (channel.id !== 'tx' || isLxSource(loaded)))
 					)
 						continue
+					const item =
+						options.item ??
+						(channel.id === 'wy'
+							? ({
+									id: '109998',
+									songmid: '109998',
+									platform: 'wy',
+									title: '贝加尔湖畔',
+									artist: '李健',
+									album: '依然',
+								} as IMusic.IMusicItem)
+							: defaultItem)
+					let failureStage: SourceChannelTestResult['failureStage'] = 'matching'
 					try {
 						const musicInfo = await resolvePlatformMusicInfo(item, channel.id, options.signal)
+						failureStage = 'urlResolution'
 						const quality = channel.qualitys.length
 							? ['128k', '320k', 'flac'].find((q) => channel.qualitys.includes(q))
 							: channel.state === 'undeclared'
@@ -225,6 +238,7 @@ export async function testSourceChannels(
 						result.urlResolved = true
 					} catch (error) {
 						result.state = 'failed'
+						result.failureStage = failureStage
 						result.error = error instanceof Error ? error.message : String(error)
 					}
 				}

@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ActivityIndicator, Alert, StyleSheet, Text, TouchableHighlight, TouchableHighlightProps, TouchableOpacity, View } from 'react-native'
 import { Image } from 'expo-image'
 import { getPlaylistReference } from '@/helpers/userApi/remotePlaylist'
+import { usePlaylistArtwork } from '@/hooks/usePlaylistArtwork'
 
 type PlaylistListItemProps = {
 	playlist: Playlist
@@ -18,6 +19,7 @@ export const PlaylistListItem = ({ playlist, onRefresh, onMore, ...props }: Play
 	const colors = useThemeColors()
 	const defaultStyles = useDefaultStyles()
 	const styles = useMemo(() => createStyles(colors, defaultStyles), [colors, defaultStyles])
+	const artwork = usePlaylistArtwork(playlist)
 	const [refreshState, setRefreshState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
 	const remotePlaylist = getPlaylistReference(playlist)
 	const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -61,10 +63,10 @@ export const PlaylistListItem = ({ playlist, onRefresh, onMore, ...props }: Play
 						contentFit="cover"
 						cachePolicy="memory-disk"
 						priority="normal"
-						recyclingKey={(playlist.coverImg ? playlist.coverImg : playlist.artwork) ?? 'missing-artwork'}
-						source={{
-							uri: playlist.coverImg?playlist.coverImg:playlist.artwork,
-						}}
+						recyclingKey={artwork.source.uri}
+						source={artwork.source}
+						placeholder={artwork.placeholder}
+						onError={artwork.onError}
 						style={styles.playlistArtworkImage}
 					/>
 				</View>

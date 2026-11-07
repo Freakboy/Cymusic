@@ -84,6 +84,7 @@ const { TracksList } = load('src/components/TracksList.tsx', {
 	'./QueueControls': { QueueControls },
 })
 const { PlaylistTracksList } = load('src/components/PlaylistTracksList.tsx', {
+	'@/hooks/usePlaylistArtwork': { usePlaylistArtwork: () => ({ source: { uri: playlist.coverImg }, onError() {} }) },
 	'@/helpers/miscellaneous': { generateTracksListId: (title) => title },
 	'./TracksList': { TracksList }, './QueueControls': { QueueControls },
 })

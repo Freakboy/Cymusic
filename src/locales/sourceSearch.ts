@@ -18,7 +18,7 @@ const zh = {
 	channelScope:
 		'tx: QQ Music · wy: 网易云 · kg: 酷狗 · kw: 酷我 · mg: 咪咕。渠道能力以脚本声明或初始化后公开的 capabilities 为准；未声明或未加载时显示未知，不代表不支持。',
 	testScope:
-		'测试范围以实际加载的渠道能力和测试结果为准。tx 优先，其他渠道按 capabilities 回退；单次返回 URL 不代表全部歌曲、音质或渠道可用。',
+		'按已加载的渠道能力分别测试：网易云默认使用李健《贝加尔湖畔》（依然），其他渠道使用周杰伦《稻香》。测试样本未匹配不代表渠道不支持；单次返回 URL 不代表全部歌曲、音质或渠道可用。',
 	url: '音源脚本 URL',
 	importUrl: '从 URL 导入',
 	importFile: '从文件导入',
@@ -37,6 +37,9 @@ const zh = {
 	currentOnly: '为避免影响播放，仅支持测试当前已加载的音源。请先选择该音源。',
 	busy: '音源请求仍在处理中，请稍后再试。',
 	failed: '操作失败',
+	sampleNotMatched: '测试样本未匹配，不代表渠道不支持',
+	urlResolutionFailed: '音源 URL 解析失败',
+	initializationFailed: '音源初始化失败',
 	retry: '重试',
 	searchError: '搜索失败，请重试。',
 	empty: '没有搜索结果',
@@ -70,7 +73,7 @@ const en: typeof zh = {
 	channelScope:
 		'tx: QQ Music · wy: NetEase · kg: Kugou · kw: Kuwo · mg: Migu. Capabilities reflect script declarations or public initialization results. Undeclared or unloaded capabilities are unknown, not unsupported.',
 	testScope:
-		'Test coverage depends on loaded capabilities and actual results. Prefer tx, with fallback according to capabilities. One returned URL does not verify all songs, qualities or channels.',
+		'Loaded channels are tested separately: NetEase defaults to Lake Baikal by Li Jian (Still); other channels use Rice Field by Jay Chou. An unmatched sample does not mean the channel is unsupported. One returned URL does not verify all songs, qualities or channels.',
 	url: 'Source script URL',
 	importUrl: 'Import URL',
 	importFile: 'Import file',
@@ -91,6 +94,9 @@ const en: typeof zh = {
 		'To protect playback, only the currently loaded source can be tested. Select this source first.',
 	busy: 'A source request is still in progress. Try again later.',
 	failed: 'Operation failed',
+	sampleNotMatched: 'Test sample not matched; channel support is not disproven',
+	urlResolutionFailed: 'Source URL resolution failed',
+	initializationFailed: 'Source initialization failed',
 	retry: 'Retry',
 	searchError: 'Search failed. Please retry.',
 	empty: 'No results',

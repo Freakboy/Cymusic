@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
+import CryptoJS from 'crypto-js'
 import { createSourceFixture, script as lxScript } from './source-runtime-fixture.mjs'
 
 const deferred = () => {
@@ -397,7 +398,18 @@ function load(path, imports, timers = clock()) {
 
 // Source operations: metadata-only lx import, unselected isolation, serial lock and timeout.
 {
-	const fixture = createSourceFixture()
+	const platformRequests = []
+	const fixture = createSourceFixture({ imports: {
+		'crypto-js': CryptoJS,
+		'crypto-js/sha256': CryptoJS.SHA256,
+		axios: { request: async (request) => {
+			platformRequests.push(request)
+			return { data: { code: 200, data: { resources: [{ baseInfo: { simpleSongData: {
+				id: 109998, name: '贝加尔湖畔', ar: [{ name: '李健' }], al: { name: '依然', id: 10888 }, dt: 245600,
+			} } }] } } }
+		} },
+	} })
+	const platforms = fixture.load('src/player/sourceResolver/platforms')
 	const timers = fixture.clock
 	const store = (value) => ({
 		getValue: () => value,
@@ -415,7 +427,9 @@ function load(path, imports, timers = clock()) {
 		'./lxMusicSourceAdapter': adapter,
 	})
 	const reloaded = [],
-		requests = []
+		requests = [],
+		matchRequests = []
+	let matchError
 	let response = '',
 		httpStatus = 200
 	// Share the production queue with simulated playback, rather than running tasks inline.
@@ -428,7 +442,12 @@ function load(path, imports, timers = clock()) {
 			'@/player/sourceResolver/runtime': runtime,
 			'@/player/sourceResolver/platforms': {
 				RESOLUTION_PLATFORMS: ['tx', 'wy', 'kg', 'kw', 'mg'],
-				resolvePlatformMusicInfo: async (_item, platform) => ({ source: platform, songmid: platform === 'tx' ? '004IArbh3ytHgR' : 123 }),
+				resolvePlatformMusicInfo: async (item, platform) => {
+					matchRequests.push({ item, platform })
+					if (platform === 'wy' && matchError) throw matchError
+					if (platform === 'wy' && item.id === '109998') return platforms.resolvePlatformMusicInfo(item, platform)
+					return { source: platform, songmid: platform === 'tx' ? '004IArbh3ytHgR' : item.id }
+				},
 			},
 			fetch: async (url, options) => {
 				requests.push({ url, options })
@@ -568,9 +587,12 @@ function load(path, imports, timers = clock()) {
 				kg: false,
 				mg: { actions: ['musicUrl'], qualitys: ['flac'] }
 			},
-			getMusicUrl: async (_title, _artist, mid, quality, context) => {
+			getMusicUrl: async (title, artist, mid, quality, context) => {
 				if (context.musicInfo.source !== context.platform) throw new Error('WRONG_PLATFORM')
-				if (context.platform === 'wy') throw new Error('WY_OFFLINE')
+				if (context.platform === 'wy') {
+					if (title !== '贝加尔湖畔' || artist !== '李健' || mid !== '' || context.musicInfo.songmid !== 109998 || quality !== '320k') throw new Error('WRONG_WY_SAMPLE')
+					throw new Error('WY_OFFLINE')
+				}
 				if (context.platform === 'tx' && (mid !== '004IArbh3ytHgR' || quality !== '128k')) throw new Error('WRONG_TX')
 				if (context.platform === 'mg' && (mid !== '' || quality !== 'flac')) throw new Error('WRONG_MG')
 				return 'https://audio.test/' + context.platform
@@ -578,12 +600,64 @@ function load(path, imports, timers = clock()) {
 		}`,
 	}
 	sources.setValue([current, multi])
+	matchRequests.length = 0
 	const multiResults = await helper.testSourceChannels(multi.id, 'busy')
+	const wySample = matchRequests.find(({ platform }) => platform === 'wy').item
+	assert.equal(wySample.title, '贝加尔湖畔', 'WY defaults must use an available native sample, not QQ 稻香')
+	assert.equal(wySample.artist, '李健')
+	assert.equal(wySample.album, '依然')
+	assert.equal(wySample.platform, 'wy')
+	assert.equal(String(wySample.id), '109998')
+	assert.ok(!wySample.duration, 'WY sample duration must not be guessed')
+	assert.equal(platformRequests.length, 1, 'Default WY must use the real business search and strict matcher')
+	assert.equal(platformRequests[0].url, 'https://interface.music.163.com/eapi/batch')
+	const wyInfo = await platforms.resolvePlatformMusicInfo(wySample, 'wy')
+	assert.equal(wyInfo.songmid, 109998, 'Only the matched native WY ID reaches the plugin')
+	assert.equal(wyInfo.duration, 245.6)
+	for (const changed of [
+		{ title: '贝加尔湖畔 (Live)' }, { artist: 'Other' }, { album: 'Other' }, { duration: 200 },
+	]) assert.equal(platforms.selectPlatformMatch({ ...wySample, ...changed }, [wyInfo]), null)
+	for (const { item, platform } of matchRequests.filter(({ platform }) => platform !== 'wy')) {
+		assert.equal(item.title, '稻香', platform)
+		assert.equal(item.artist, '周杰伦', platform)
+		assert.equal(item.songmid, '003aAYrm3GE0Ac', platform)
+	}
 	assert.deepEqual(Array.from(multiResults, ({ id, state, urlResolved }) => [id, state, urlResolved]), [
 		['tx', 'supported', true], ['wy', 'failed', false], ['kg', 'unsupported', false],
 		['kw', 'undeclared', false], ['mg', 'supported', true],
 	])
 	assert.match(multiResults[1].error, /^(?:Error: )?WY_OFFLINE$/)
+	assert.equal(multiResults[1].failureStage, 'urlResolution')
+	assert.equal(multiResults[1].declaredState, 'supported')
+	assert.equal(multiResults[0].failureStage, undefined)
+	const custom = { id: 'custom-id', platform: 'tx', title: 'Custom', artist: 'Artist', album: 'Custom album', duration: 100 }
+	matchRequests.length = 0
+	matchError = new Error('wy_MATCH_NOT_FOUND')
+	const unmatched = await helper.testSourceChannels(multi.id, 'busy', { item: custom })
+	assert.ok(matchRequests.every(({ item }) => item === custom), 'Explicit samples must never be replaced, even on matching failure')
+	assert.equal(unmatched[1].failureStage, 'matching')
+	assert.match(unmatched[1].error, /^(?:Error: )?wy_MATCH_NOT_FOUND$/)
+	assert.equal(unmatched[1].declaredState, 'supported')
+	assert.equal(unmatched[1].urlResolved, false)
+	assert.equal(unmatched[4].urlResolved, true, 'Matching failure must not prevent later channels from being tested')
+	matchError = undefined
+	const customRequest = {
+		id: 'custom-request',
+		script: `module.exports = { sources: { wy: {actions:['musicUrl'], qualitys:['128k']} },
+			getMusicUrl: async (title, artist, mid, quality, context) => {
+				if (title !== 'Custom' || artist !== 'Artist' || mid !== '' || context.musicInfo.songmid !== 'custom-id') throw new Error('CUSTOM_REPLACED')
+				return 'https://audio.test/custom'
+			} }`,
+	}
+	sources.setValue([current, multi, customRequest])
+	assert.equal((await helper.testSourceChannels(customRequest.id, 'busy', { item: custom }))[1].urlResolved, true)
+	const broken = { id: 'broken', sources: { wy: {actions: ['musicUrl'], qualitys: ['128k']}, kg: false }, script: 'throw new Error("INIT_FAILED")' }
+	sources.setValue([current, multi, broken])
+	const initialization = await helper.testSourceChannels(broken.id, 'busy')
+	assert.ok(initialization.every(({ failureStage, urlResolved }) => failureStage === 'initialization' && !urlResolved))
+	assert.equal(initialization[1].declaredState, 'supported')
+	assert.equal(initialization[2].declaredState, 'unsupported')
+	assert.match(initialization[1].error, /INIT_FAILED/)
 	assert.ok(multiResults.every((channel) => channel.playbackVerified === false))
 	assert.equal(selected.getValue(), current)
 	assert.equal(saved.get('music.musicApi'), savedSnapshot)
@@ -612,6 +686,7 @@ function load(path, imports, timers = clock()) {
 	assert.equal(failed[0].state, 'failed')
 	assert.equal(failed[1].state, 'unsupported')
 	assert.equal(failed[0].error, 'INVALID_AUDIO_URL')
+	assert.equal(failed[0].failureStage, 'urlResolution')
 	selected.setValue({ id: 'current', script: 'module.exports = {getMusicUrl: () => new Promise(() => {})}' })
 	const timeout = helper.testSourceChannels('current', 'busy')
 	await flush()
@@ -669,7 +744,7 @@ function load(path, imports, timers = clock()) {
 }
 // Management screen: exercise native menu actions and their disabled/hidden affordances.
 if (!process.argv.includes('--helpers-only')) {
-	const labels = load('src/locales/sourceSearch.ts', {
+	let labels = load('src/locales/sourceSearch.ts', {
 		'@/utils/i18n': { nowLanguage: { useValue: () => 'en' } },
 	}).useSourceSearchText()
 	let sources = [
@@ -863,6 +938,37 @@ if (!process.argv.includes('--helpers-only')) {
 	].join('\n')
 	assert.ok(nodes(tree).some((node) => node.type === 'Text' && node.props.children === summary),
 		'Each platform must show its own success, failure, unsupported or unknown result')
+	const english = labels
+	const chinese = load('src/locales/sourceSearch.ts', {
+		'@/utils/i18n': { nowLanguage: { useValue: () => 'zh' } },
+	}).useSourceSearchText()
+	assert.equal(chinese.sampleNotMatched, '测试样本未匹配，不代表渠道不支持')
+	for (const language of [english, chinese]) {
+		labels = language
+		render()
+		await pressAction('other', 'test')
+		assert.deepEqual(calls.shift(), ['test', 'other', labels.busy])
+		pendingTest.resolve([
+			{ id: 'tx', state: 'failed', failureStage: 'initialization', error: 'INIT_FAILED' },
+			{ id: 'wy', state: 'failed', declaredState: 'supported', failureStage: 'matching', error: 'wy_MATCH_NOT_FOUND' },
+			{ id: 'kg', state: 'unsupported' },
+			{ id: 'kw', state: 'failed', error: 'UNKNOWN_ERROR' },
+			{ id: 'mg', state: 'failed', failureStage: 'urlResolution', error: 'INVALID_AUDIO_URL' },
+		])
+		await flush()
+		render()
+		const expected = [
+			`${labels.channelTx}: ${labels.initializationFailed} (INIT_FAILED)`,
+			`${labels.channelWy}: ${labels.sampleNotMatched} (wy_MATCH_NOT_FOUND)`,
+			`${labels.channelKg}: ${labels.unsupported}`,
+			`${labels.channelKw}: ${labels.failed} (UNKNOWN_ERROR)`,
+			`${labels.channelMg}: ${labels.urlResolutionFailed} (INVALID_AUDIO_URL)`,
+		].join('\n')
+		assert.ok(nodes(tree).some((node) => node.type === 'Text' && node.props.children === expected),
+			'Matching, URL resolution and initialization failures need distinct localized labels, with generic fallback')
+	}
+	labels = english
+	render()
 	await toggle('current', false)
 	assert.equal(sources[0].enabled, true)
 	assert.ok(nodes(tree).some((node) => node.props.accessibilityRole === 'alert' &&

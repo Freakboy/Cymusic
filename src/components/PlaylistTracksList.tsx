@@ -8,6 +8,7 @@ import { Image } from 'expo-image'
 import type { Track } from '@/player/types'
 import { QueueControls } from './QueueControls'
 import { TracksList, TracksListProps } from './TracksList'
+import { usePlaylistArtwork } from '@/hooks/usePlaylistArtwork'
 
 type PlaylistTracksListProps = {
 	playlist: Playlist
@@ -47,6 +48,7 @@ export const PlaylistTracksList = ({
 }: PlaylistTracksListProps) => {
 	const defaultStyles = useDefaultStyles()
 	const styles = useMemo(() => createStyles(defaultStyles), [defaultStyles])
+	const artwork = usePlaylistArtwork(playlist)
 	// const filteredPlaylistTracks = useMemo(() => {
 	// 	return playlist.tracks.filter(trackTitleFilter(search))
 	// }, [playlist.tracks, search])
@@ -67,10 +69,10 @@ export const PlaylistTracksList = ({
 							contentFit="cover"
 							cachePolicy="memory-disk"
 							priority="high"
-							recyclingKey={(playlist.coverImg || playlist.artwork) ?? 'missing-artwork'}
-							source={{
-								uri: playlist.coverImg || playlist.artwork,
-							}}
+							recyclingKey={artwork.source.uri}
+							source={artwork.source}
+							placeholder={artwork.placeholder}
+							onError={artwork.onError}
 							style={styles.artworkImage}
 						/>
 					</View>

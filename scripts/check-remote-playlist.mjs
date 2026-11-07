@@ -674,6 +674,7 @@ function rowFixture(onRefresh) {
 		'@expo/vector-icons': { Ionicons: 'Icon' },
 		'expo-image': { Image: 'Image' },
 		'@/helpers/userApi/remotePlaylist': { getPlaylistReference: () => ref() },
+		'@/hooks/usePlaylistArtwork': { usePlaylistArtwork: () => ({ source: { uri: 'asset://default' }, onError() {} }) },
 		'react-native': { ActivityIndicator: 'Spinner', Text: 'Text', TouchableHighlight: 'Row', TouchableOpacity: 'Button', View: 'View',
 			StyleSheet: { create: (value) => value }, Alert: { alert: (...args) => alerts.push(args) } },
 	}, { ...clock, React: react, Error })

@@ -11,6 +11,7 @@ import {
 	type RemotePlaylistResult,
 } from '@/helpers/userApi/remotePlaylist'
 import { useThemeColors } from '@/hooks/useAppTheme'
+import { usePlaylistArtwork } from '@/hooks/usePlaylistArtwork'
 import { usePlaylistFeatureText } from '@/locales/playlistFeature'
 import { playListsStore } from '@/player/PlayerStore'
 import { useDefaultStyles } from '@/styles'
@@ -43,6 +44,7 @@ const ImportPlayList = () => {
 	const [newCover, setNewCover] = useState<string | undefined>()
 	const [playlistUrl, setPlaylistUrl] = useState('')
 	const [preview, setPreview] = useState<RemotePlaylistResult | null>(null)
+	const previewArtwork = usePlaylistArtwork(preview)
 	const [isLoading, setIsLoading] = useState(false)
 	const [isSaving, setIsSaving] = useState(false)
 	const [error, setError] = useState<string | null>(null)
@@ -276,7 +278,9 @@ const ImportPlayList = () => {
 									<Text style={styles.label}>{text.previewTitle}</Text>
 									<View style={styles.previewRow}>
 										<Image
-											source={{ uri: preview.artwork || unknownTrackImageUri }}
+											source={previewArtwork.source}
+											defaultSource={previewArtwork.placeholder}
+											onError={previewArtwork.onError}
 											style={styles.cover}
 											accessibilityLabel={text.cover}
 										/>
