@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { assert, checks, deferred, flush, loadModule, root } from './native-services-fixture.mjs'
 
 const suite = checks()
-const song = (id) => ({ id, platform: 'tx', title: `Song ${id}`, artist: 'Artist' })
+const song = (id) => ({ id, platform: 'tx', title: `Song ${id}`, artist: 'Artist', album: `Album ${id}` })
 const state = (value) => ({ getValue: () => value, setValue: (next) => { value = next } })
 const plain = (value) => JSON.parse(JSON.stringify(value))
 
@@ -196,14 +196,49 @@ await suite.check('title projection uses real LRC positions/delay, deduplicates 
 	const h = runtime(); h.persist.set('music.bluetoothLyrics', true)
 	h.lyrics.setValue('[00:01]First\n[00:03]Second')
 	const bridge = await h.startCarPlayBridge(); h.setPosition(1); h.tick(); h.tick()
-	assert.deepEqual(h.metadata, [[0, { title: 'First' }]])
+	assert.deepEqual(h.metadata, [[0, { title: 'First', artist: 'Song a - Artist', albumTitle: 'Album a' }]])
 	h.setPosition(3); h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'Second')
 	h.persist.set('lyric.delaySeconds', 2); h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'First')
 	h.persist.set('music.bluetoothLyrics', false); assert.equal(h.metadata.at(-1)[1].title, 'Song a')
+	assert.deepEqual(h.metadata.at(-1)[1], { title: 'Song a', artist: 'Artist', albumTitle: 'Album a' })
 	const count = h.metadata.length; h.tick(); await bridge.setLyricTitleEnabled(false); assert.equal(h.metadata.length, count)
 	await bridge.setLyricTitleEnabled(true); assert.equal(h.persist.get('music.bluetoothLyrics'), true)
 	h.tick(); assert.equal(h.metadata.at(-1)[1].title, 'First')
 	bridge.dispose(); assert.equal(h.metadata.at(-1)[1].title, 'Song a')
+	assert.deepEqual(h.metadata.at(-1)[1], { title: 'Song a', artist: 'Artist', albumTitle: 'Album a' })
+})
+
+await suite.check('Bluetooth second line carries song and artist during intros, lyrics and same-line track changes without mutating songs', async () => {
+	const h = runtime(); h.persist.set('music.bluetoothLyrics', true)
+	const first = h.current.getValue(), snapshot = plain(first)
+	h.lyrics.setValue('[00:03]Shared lyric')
+	const bridge = await h.startCarPlayBridge(); h.tick()
+	assert.deepEqual(h.metadata.at(-1)[1], { title: 'Song a', artist: 'Song a - Artist', albumTitle: 'Album a' })
+	h.setPosition(3); h.tick()
+	assert.deepEqual(h.metadata.at(-1)[1], { title: 'Shared lyric', artist: 'Song a - Artist', albumTitle: 'Album a' })
+	const next = song('b'); h.setActive(next); h.tick()
+	assert.equal(h.metadata.at(-1)[1].artist, 'Song a - Artist', 'Do not write to an unadopted native item')
+	h.current.setValue(next); h.tick()
+	assert.deepEqual(h.metadata.at(-1)[1], { title: 'Shared lyric', artist: 'Song b - Artist', albumTitle: 'Album b' })
+	h.lyrics.setValue(null); h.tick()
+	assert.deepEqual(h.metadata.at(-1)[1], { title: 'Song b', artist: 'Song b - Artist', albumTitle: 'Album b' })
+	await bridge.setLyricTitleEnabled(false)
+	assert.deepEqual(h.metadata.at(-1)[1], { title: 'Song b', artist: 'Artist', albumTitle: 'Album b' })
+	assert.deepEqual(plain(first), snapshot)
+	assert.deepEqual(plain(next), song('b'))
+	bridge.dispose()
+})
+
+await suite.check('missing artist or album leaves no dangling separator or stale album and disabling remains idempotent', async () => {
+	const h = runtime(); h.persist.set('music.bluetoothLyrics', true)
+	const track = { ...song('a'), artist: '', album: undefined }
+	h.current.setValue(track); h.setActive(track); h.lyrics.setValue('[00:00]Line')
+	const bridge = await h.startCarPlayBridge(); h.tick()
+	assert.deepEqual(h.metadata.at(-1)[1], { title: 'Line', artist: 'Song a', albumTitle: '' })
+	await bridge.setLyricTitleEnabled(false)
+	assert.deepEqual(h.metadata.at(-1)[1], { title: 'Song a', artist: '', albumTitle: '' })
+	const count = h.metadata.length; h.tick(); bridge.dispose()
+	assert.equal(h.metadata.length, count)
 })
 
 await suite.check('track transition never projects old lyrics into native next slot; empty/new lyrics reset parser', async () => {

@@ -61,6 +61,7 @@ const media = load('src/utils/mediaItem.ts', {
 	'@/constants/commonConst': {}, '@/store/mediaExtra': {},
 })
 const Row = load('src/components/TracksListItem.tsx', {
+	'@/hooks/useTrackArtwork': { useTrackArtwork: (track) => ({ source: { uri: track.artwork || 'unknown' }, onError() {}, onLoad() {} }) },
 	'@/components/TrackShortcutsMenu': { TrackShortcutsMenu: 'TrackShortcutsMenu' },
 	'@/utils/imageUtils': { getThumbnailArtwork: (value) => value },
 	'@/utils/rpx': (value) => value,

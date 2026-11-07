@@ -115,6 +115,7 @@ export function createFixture() {
 			'importedLocalMusicStore',
 			'nowLyricState',
 			'nowTranslationLyricState',
+			'lyricsStatusStore',
 			'trackSkipLoadingStore',
 			'trackSourceLoadingStore',
 			'playbackIntentStore',
@@ -123,6 +124,7 @@ export function createFixture() {
 		stores.qualityStore.setValue('128k')
 		stores.repeatModeStore.setValue('queue')
 		stores.playbackIntentStore.setValue('pause')
+		stores.lyricsStatusStore.setValue({ status: 'idle', retryable: false })
 		stores.preloadNextTrackStore.setValue(true)
 		const persistence = {
 			get: (key) => {

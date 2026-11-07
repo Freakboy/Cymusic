@@ -6,6 +6,7 @@ import { PlayerRepeatToggle } from '@/components/PlayerRepeatToggle'
 import { PlayerVolumeBar } from '@/components/PlayerVolumeBar'
 import { ShowPlayerListToggle } from '@/components/ShowPlayerListToggle'
 import { unknownTrackImageUri } from '@/constants/images'
+import { useTrackArtwork } from '@/hooks/useTrackArtwork'
 import { ThemeColors, fontSize, screenPadding } from '@/constants/tokens'
 import LyricManager from '@/helpers/lyricManager'
 import myTrackPlayer from '@/helpers/trackPlayerIndex'
@@ -156,8 +157,10 @@ const PlayerScreenContent = () => {
 
 	const trackToDisplay = currentActiveTrack ?? prevTrackRef.current
 
-	const artworkUri = trackToDisplay?.artwork || unknownTrackImageUri
-	const artworkSource = useMemo(() => ({ uri: artworkUri }), [artworkUri])
+	const artwork = useTrackArtwork(trackToDisplay, !!currentActiveTrack, {
+		fullSize: true, onConfirmed: myTrackPlayer.updateCurrentArtwork,
+	})
+	const artworkUri = artwork.source.uri
 	const { backgroundColor } = usePlayerBackground(artworkUri)
 	const artworkFade = useMemo(
 		() =>
@@ -521,8 +524,11 @@ const PlayerScreenContent = () => {
 												cachePolicy="memory-disk"
 												priority="high"
 												transition={200}
-												recyclingKey={artworkUri}
-												source={artworkSource}
+												key={`${trackToDisplay?.platform}:${trackToDisplay?.id}:${artworkUri}`}
+												recyclingKey={`${trackToDisplay?.platform}:${trackToDisplay?.id}:${artworkUri}`}
+												source={artwork.source}
+												onError={artwork.onError}
+												onLoad={artwork.onLoad}
 												style={styles.artworkImage}
 											/>
 										</TouchableOpacity>

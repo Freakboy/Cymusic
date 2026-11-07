@@ -1,9 +1,9 @@
 import { PlayPauseButton, SkipToNextButton } from '@/components/PlayerControls'
 import myTrackPlayer, { trackSourceLoadingStore } from '@/helpers/trackPlayerIndex'
-import { unknownTrackImageUri } from '@/constants/images'
 import { ThemeColors } from '@/constants/tokens'
 import { useAppTheme, useThemeColors } from '@/hooks/useAppTheme'
 import { useLastActiveTrack } from '@/hooks/useLastActiveTrack'
+import { useTrackArtwork } from '@/hooks/useTrackArtwork'
 import { useDefaultStyles } from '@/styles'
 import { BlurView } from 'expo-blur'
 import * as Haptics from 'expo-haptics'
@@ -40,6 +40,7 @@ export const FloatingPlayer = React.memo(({ style }: ViewProps) => {
 	const lastActiveTrack = useLastActiveTrack()
 	const isTrackSourceLoading = trackSourceLoadingStore.useValue() !== null
 	const displayedTrack = currentMusic ?? lastActiveTrack
+	const artwork = useTrackArtwork(displayedTrack, !!currentMusic, { onConfirmed: myTrackPlayer.updateCurrentArtwork })
 
 	const artworkOpacity = useSharedValue(1)
 	const prevArtworkRef = useRef(displayedTrack?.artwork)
@@ -70,10 +71,11 @@ export const FloatingPlayer = React.memo(({ style }: ViewProps) => {
 					<Image
 						contentFit="cover"
 						cachePolicy="memory-disk"
-						recyclingKey={displayedTrack.artwork ?? unknownTrackImageUri ?? 'missing-artwork'}
-						source={{
-							uri: displayedTrack.artwork ?? unknownTrackImageUri,
-						}}
+						key={`${displayedTrack.platform}:${displayedTrack.id}:${artwork.source.uri}`}
+						recyclingKey={`${displayedTrack.platform}:${displayedTrack.id}:${artwork.source.uri}`}
+						source={artwork.source}
+						onError={artwork.onError}
+						onLoad={artwork.onLoad}
 						style={StyleSheet.absoluteFill}
 					/>
 				</Animated.View>

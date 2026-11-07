@@ -8,6 +8,7 @@ import i18n from '@/locales/commentsFeature'
 import axios from 'axios'
 import { Alert } from 'react-native'
 import { logError, logInfo } from '../logger'
+import { getNeteaseLyrics, isNeteaseLyricsPlatform } from './neteaseLyrics'
 const { DEV_URL_PREFIX, KW_URL } = {
 	DEV_URL_PREFIX: 'https://dev.music.ximalaya.com/api/v1/track/url',
 	KW_URL: 'https://www.kuwo.cn/api/v1/www/music/playUrl',
@@ -121,16 +122,8 @@ const parseResponse = async (response) => {
 }
 
 export const myGetLyric = async (musicItem) => {
+	if (isNeteaseLyricsPlatform(musicItem.platform)) return getNeteaseLyrics(musicItem.id)
 	try {
-		if (musicItem.platform === 'Netease') {
-			const response = await fetch(`https://music.163.com/api/song/lyric?id=${encodeURIComponent(musicItem.id)}&lv=1&kv=1&tv=-1`)
-			if (!response.ok) throw new Error('Get Netease lyric failed')
-			const data = await response.json()
-			return {
-				lyric: typeof data?.lrc?.lyric === 'string' && data.lrc.lyric ? data.lrc.lyric : `[00:00.00]${i18n.t('commentsFeature.noLyrics')}`,
-				tlyric: typeof data?.tlyric?.lyric === 'string' ? data.tlyric.lyric : '',
-			}
-		}
 		const requestObj = httpFetch(
 			`https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=${musicItem.id}&g_tk=5381&loginUin=0&hostUin=0&format=json&inCharset=utf8&outCharset=utf-8&platform=yqq`,
 			{

@@ -17,6 +17,7 @@ import ReactNativeTrackPlayer, {
 } from '@rntp/player'
 import type { Track } from '@/player/types'
 import { getNativeTrackIdentity, toMediaItem } from '@/player/mediaItem'
+import { neteaseArtworkKey, usableArtwork } from '@/utils/imageUtils'
 
 import { MusicRepeatMode } from '@/helpers/types'
 import PersistStatus from '@/store/PersistStatus'
@@ -61,6 +62,7 @@ import {
 	importedLocalMusicStore,
 	nowLyricState,
 	nowTranslationLyricState,
+	lyricsStatusStore,
 	trackSkipLoadingStore,
 	trackSourceLoadingStore,
 	playbackIntentStore,
@@ -100,6 +102,7 @@ export {
 	importedLocalMusicStore,
 	nowLyricState,
 	nowTranslationLyricState,
+	lyricsStatusStore,
 	trackSkipLoadingStore,
 	trackSourceLoadingStore,
 	playbackIntentStore,
@@ -128,6 +131,8 @@ let installedNext: { ownerToken: string; value: PreparedNextTrack } | null = nul
 let prepareTimer: ReturnType<typeof setTimeout> | null = null
 let prepareRevision = 0
 let sourceRevision = 0
+let lyricsSequence = 0
+let retryLyrics: (() => Promise<void>) | null = null
 
 function retirePreparedSlot() {
 	if (prepareTimer !== null) clearTimeout(prepareTimer)
@@ -202,15 +207,19 @@ function reconcileStreamPriority() {
 }
 
 function fetchCurrentLyrics(track: IMusic.IMusicItem, token: string) {
+	const sequence = ++lyricsSequence
+	retryLyrics = null
+	let isCurrent = () => false
 	// Playback clears its loading flag in finally after scheduling this request.
-	void Promise.resolve().then(async () => {
+	return Promise.resolve().then(async () => {
 		const source = musicApiSelectedStore.getValue() as SourceMusicApi | null
 		const identity = sourceId(source)
 		const revision = sourceRevision
-		const isCurrent = () => isCurrentMusic(track) && nativeQueue?.token === token &&
+		isCurrent = () => sequence === lyricsSequence && isCurrentMusic(track) && nativeQueue?.token === token &&
 			trackSourceLoadingStore.getValue() === null && sourceRevision === revision &&
 			sourceId(musicApiSelectedStore.getValue()) === identity
 		if (!isCurrent()) return
+		lyricsStatusStore.setValue({ status: 'loading', retryable: false })
 		let sourceLyrics: SourceLyric | null = null
 		if (source?.enabled !== false && typeof source?.getLyric === 'function') {
 			try {
@@ -226,23 +235,57 @@ function fetchCurrentLyrics(track: IMusic.IMusicItem, token: string) {
 			nowLyricState.setValue(sourceLyrics.lyric || null)
 			if (!isCurrent()) return
 			nowTranslationLyricState.setValue(sourceLyrics.tlyric || null)
+			if (sourceLyrics.lyric) lyricsStatusStore.setValue({ status: 'available', retryable: false })
 			if (sourceLyrics.lyric && sourceLyrics.tlyric) return
 		}
 		if (!isCurrent()) return
 		let platformLyrics: SourceLyric | null = null
+		let status: 'available' | 'instrumental' | 'unavailable' | 'error' = 'error'
+		let retryable = true
 		if (!sourceLyrics?.lyric || !sourceLyrics.tlyric) {
 			try {
-				platformLyrics = normalizeSourceLyric(await myGetLyric(track))
+				const result = await myGetLyric(track)
+				platformLyrics = normalizeSourceLyric(result)
+				// Older QQ responses encode request failure as a display-only LRC line.
+				if (platformLyrics && /^\[00:00(?:\.00)?\](?:暂无歌词|No lyrics available)\s*$/i.test(platformLyrics.lyric)) {
+					platformLyrics = null
+				}
+				status = result && 'status' in result ? result.status : platformLyrics?.lyric ? 'available' : 'error'
+				retryable = result && 'retryable' in result ? result.retryable === true : status === 'error'
+				if (status !== 'available') platformLyrics = null
 			} catch (error) {
 				logError('获取平台歌词失败:', error)
 			}
 		}
 		if (!isCurrent()) return
 		const lyc = mergeSourceLyric(sourceLyrics, platformLyrics)
-		if (!lyc) return
-		nowLyricState.setValue(lyc.lyric || null)
-		if (isCurrent()) nowTranslationLyricState.setValue(lyc.tlyric || null)
-	}).catch((error) => logError('获取歌词失败:', error))
+		nowLyricState.setValue(lyc?.lyric || null)
+		if (!isCurrent()) return
+		nowTranslationLyricState.setValue(lyc?.tlyric || null)
+		if (!isCurrent()) return
+		lyricsStatusStore.setValue({ status: lyc?.lyric ? 'available' : status, retryable: !lyc?.lyric && status === 'error' && retryable })
+		if (!lyc?.lyric && status === 'error' && retryable) {
+			retryLyrics = () => isCurrent() ? fetchCurrentLyrics(track, token) : Promise.resolve()
+		}
+	}).catch((error) => {
+		logError('获取歌词失败:', error)
+		if (!isCurrent()) return
+		const available = !!nowLyricState.getValue()
+		lyricsStatusStore.setValue({ status: available ? 'available' : 'error', retryable: !available })
+		if (!available) retryLyrics = () => isCurrent() ? fetchCurrentLyrics(track, token) : Promise.resolve()
+	})
+}
+
+function retryCurrentLyrics(): Promise<void> {
+	const state = lyricsStatusStore.getValue()
+	return state.status === 'error' && state.retryable && retryLyrics ? retryLyrics() : Promise.resolve()
+}
+
+function refetchCurrentLyricsIfOwned() {
+	if (nativeQueue && trackSourceLoadingStore.getValue() === null &&
+		isCurrentNativeItem(ReactNativeTrackPlayer.getActiveMediaItem())) {
+		void fetchCurrentLyrics(nativeQueue.track as IMusic.IMusicItem, nativeQueue.token)
+	}
 }
 
 /** Validate against the current native queue, not a queued event's index alone. */
@@ -263,6 +306,43 @@ function isCurrentProgressEvent(event: PlaybackProgressUpdatedEvent) {
 	const active = ReactNativeTrackPlayer.getActiveMediaItem()
 	return isCurrentNativeItem(active) && event.mediaId === active?.mediaId &&
 		Number.isFinite(event.timestamp) && event.timestamp >= nativeQueue.startedAt
+}
+
+const pendingConfirmedArtwork = new Map<string, string>()
+
+/** Retain loading-track confirmations; return true only after native publication. */
+export function updateCurrentArtwork(track: { id?: string | number; platform?: string }, uri: string): boolean {
+	const key = neteaseArtworkKey(track)
+	const artwork = usableArtwork(uri)
+	const current = currentMusicStore.getValue()
+	const owned = nativeQueue
+	if (!key || !artwork || key !== neteaseArtworkKey(current)) return false
+	if (trackSourceLoadingStore.getValue() !== null) {
+		pendingConfirmedArtwork.delete(key)
+		pendingConfirmedArtwork.set(key, artwork)
+		if (pendingConfirmedArtwork.size > 128) pendingConfirmedArtwork.delete(pendingConfirmedArtwork.keys().next().value!)
+		return false
+	}
+	if (key !== neteaseArtworkKey(owned?.track) ||
+		!isCurrentNativeItem(ReactNativeTrackPlayer.getActiveMediaItem())) return false
+	try {
+		if (ReactNativeTrackPlayer.getActiveMediaItem()?.artworkUrl !== artwork) {
+			ReactNativeTrackPlayer.updateMetadata(0, { artworkUrl: artwork })
+		}
+		if (nativeQueue !== owned || currentMusicStore.getValue() !== current ||
+			!isCurrentNativeItem(ReactNativeTrackPlayer.getActiveMediaItem())) return false
+		owned.track = { ...owned.track, artwork }
+		if (current.artwork !== artwork) {
+			const updated = { ...current, artwork }
+			currentMusicStore.setValue(updated)
+			PersistStatus.set('music.musicItem', updated)
+		}
+		pendingConfirmedArtwork.delete(key)
+		return true
+	} catch (error) {
+		logError('Artwork metadata update failed', error)
+		return false
+	}
 }
 
 function setPlaybackIntent(intent: 'play' | 'pause' | 'stop') {
@@ -292,7 +372,10 @@ function adoptPreparedTransition(item: MediaItem | null | undefined, index: numb
 		identity?.token === target.token && activeIdentity?.token === target.token &&
 		identity?.preparedGeneration === value.generation && activeIdentity?.preparedGeneration === value.generation &&
 		!identity.placeholder && !activeIdentity.placeholder) {
-		const track = value.track as IMusic.IMusicItem
+		// Whitelist artwork only: the prepared source owns headers/cache identity.
+		const latestArtwork = expected?.artwork !== value.track.artwork ? expected?.artwork
+			: isSameMediaItem(expected, nativeQueue.track as IMusic.IMusicItem) ? nativeQueue.track.artwork : expected?.artwork
+		const track = { ...value.track, artwork: latestArtwork || value.track.artwork } as IMusic.IMusicItem
 		installedNext = null
 		retirePreparedSlot()
 		retireTrackSkip()
@@ -302,6 +385,7 @@ function adoptPreparedTransition(item: MediaItem | null | undefined, index: numb
 		PersistStatus.set('music.musicItem', track)
 		ReactNativeTrackPlayer.removeMediaItem(0)
 		ReactNativeTrackPlayer.addMediaItem(toMediaItem(getFakeNextTrack(), target.token, true))
+		if (track.artwork) updateCurrentArtwork(track, track.artwork)
 		PersistStatus.set('music.progress', ReactNativeTrackPlayer.getProgress().position)
 		fetchCurrentLyrics(track, target.token)
 		setCurrentStreamPriority(false)
@@ -343,6 +427,11 @@ function observeNativeTransport(intent: 'play' | 'pause' | 'stop') {
 }
 
 function reset() {
+	lyricsSequence++
+	retryLyrics = null
+	nowLyricState.setValue(null)
+	nowTranslationLyricState.setValue(null)
+	lyricsStatusStore.setValue({ status: 'idle', retryable: false })
 	retirePreparedSlot()
 	setCurrentStreamPriority(false)
 	controlRevision++
@@ -755,8 +844,11 @@ const setTrackSource = (track: Track) => {
  */
 const setCurrentMusic = (musicItem?: IMusic.IMusicItem | null) => {
 	if (!isSameMediaItem(musicItem, currentMusicStore.getValue()) || !musicItem) {
+		lyricsSequence++
+		retryLyrics = null
 		nowLyricState.setValue(null)
 		nowTranslationLyricState.setValue(null)
+		lyricsStatusStore.setValue({ status: musicItem ? 'loading' : 'idle', retryable: false })
 	}
 	if (!musicItem) {
 		currentIndex = -1
@@ -962,10 +1054,8 @@ const addMusicApi = (musicApi: IMusic.MusicApi) => {
 	}
 }
 const reloadNowSelectedMusicApi = async () => {
+	const revision = ++sourceRevision
 	try {
-		// 获取当前存储的所有音源脚本
-		const revision = ++sourceRevision
-
 		// 找到被选中的音源脚本
 		const selectedApi = musicApiSelectedStore.getValue()
 
@@ -994,6 +1084,8 @@ const reloadNowSelectedMusicApi = async () => {
 	} catch (error) {
 		logError('Error reloading selected music API:', error)
 		throw error
+	} finally {
+		if (revision === sourceRevision) refetchCurrentLyricsIfOwned()
 	}
 }
 const reloadMusicApi = (musicApi: IMusic.MusicApi, isTest: boolean = false): Promise<IMusic.MusicApi> => withSourceRuntimeLock(async () => {
@@ -1030,6 +1122,7 @@ const reloadMusicApi = (musicApi: IMusic.MusicApi, isTest: boolean = false): Pro
 	}
 })
 const setMusicApiAsSelectedById = async (musicApiId: string) => {
+	let revision: number | undefined
 	try {
 		// 获取当前存储的所有音源脚本
 		let musicApis: IMusic.MusicApi[] = musicApiStore.getValue() || []
@@ -1051,7 +1144,7 @@ const setMusicApiAsSelectedById = async (musicApiId: string) => {
 
 		// 获取新选中的音源
 		const selectedApi = musicApis[targetApiIndex]
-		const revision = ++sourceRevision
+		revision = ++sourceRevision
 		invalidatePreparedSlot()
 		musicApiStore.setValue(musicApis)
 		PersistStatus.set('music.musicApi', musicApis)
@@ -1077,6 +1170,8 @@ const setMusicApiAsSelectedById = async (musicApiId: string) => {
 	} catch (error) {
 		logError('Error setting music API as selected:', error)
 		Alert.alert('错误', '设置选中音源时发生错误')
+	} finally {
+		if (revision !== undefined && revision === sourceRevision) refetchCurrentLyricsIfOwned()
 	}
 }
 
@@ -1084,13 +1179,15 @@ const deleteMusicApiById = (musicApiId: string) => {
 	const selectedMusicApi = musicApiSelectedStore.getValue()
 	const musicApis = musicApiStore.getValue() || []
 	if (selectedMusicApi?.id === musicApiId) {
-		sourceRevision++
+		const revision = ++sourceRevision
 		invalidatePreparedSlot()
 		musicApiSelectedStore.setValue(null)
 		PersistStatus.set('music.selectedMusicApi', undefined)
 		void withSourceRuntimeLock(async () => {
 			if (!musicApiSelectedStore.getValue()) disposeLxMusicScript()
-		}).catch((error) => logError('释放音源失败', error))
+		}).catch((error) => logError('释放音源失败', error)).finally(() => {
+			if (revision === sourceRevision) refetchCurrentLyricsIfOwned()
+		})
 	}
 	const musicApisFiltered = musicApis.filter((musicApi) => musicApi.id !== musicApiId)
 	musicApiStore.setValue(musicApisFiltered)
@@ -1164,7 +1261,10 @@ const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, s
 		}
 
 		// 6. Build track and set source
+		const artworkKey = neteaseArtworkKey(musicItem)
+		const confirmedArtwork = artworkKey ? pendingConfirmedArtwork.get(artworkKey) : undefined
 		const track = mergeProps(musicItem, {
+			...(confirmedArtwork ? { artwork: confirmedArtwork } : {}),
 			url: source.wasCached ? getCacheFileUri(source.url) : source.url,
 			headers: source.headers,
 			userAgent: source.userAgent,
@@ -1173,6 +1273,7 @@ const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, s
 		}) as IMusic.IMusicItem
 		logInfo('获取音源成功：', track)
 		setTrackSource(track)
+		if (artworkKey && pendingConfirmedArtwork.get(artworkKey) === confirmedArtwork) pendingConfirmedArtwork.delete(artworkKey)
 		const appliedToken = nativeQueue.token
 
 		// 7. Fetch lyrics in background (non-blocking)
@@ -1479,6 +1580,8 @@ const showErrorMessage = (message: string) => {
 	}
 }
 const myTrackPlayer = {
+	updateCurrentArtwork,
+	retryCurrentLyrics,
 	setupTrackPlayer,
 	usePlayList,
 	getPlayList,

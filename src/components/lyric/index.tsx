@@ -1,10 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ActivityIndicator, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
+import React, { useCallback, useEffect, useMemo, useRef } from 'react'
+import { ActivityIndicator, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import type { FlatList as NativeFlatList, FlatListProps } from 'react-native'
 
 import { ThemeColors } from '@/constants/tokens'
 import LyricManager from '@/helpers/lyricManager'
-import myTrackPlayer from '@/helpers/trackPlayerIndex'
+import myTrackPlayer, { lyricsStatusStore, nowLyricState, nowTranslationLyricState } from '@/helpers/trackPlayerIndex'
 import { useThemeColors } from '@/hooks/useAppTheme'
 import useDelayFalsy from '@/hooks/useDelayFalsy'
 import PersistStatus from '@/store/PersistStatus'
@@ -49,7 +49,14 @@ export default function Lyric(_props: IProps) {
 	// const parser = new LyricParser(lrcSource, musicItem, {})
 	// const lyrics = parser.getLyric()
 	// console.log('lyrics', lyrics)
-	const [loading] = useState(false)
+	const lyricsStatus = lyricsStatusStore.useValue()
+	const rawLyric = nowLyricState.useValue()
+	const rawTranslation = nowTranslationLyricState.useValue()
+	const currentMusic = myTrackPlayer.useCurrentMusic()
+	const loading = lyricsStatus.status === 'loading'
+	useEffect(() => {
+		void LyricManager.refreshLyric()
+	}, [rawLyric, rawTranslation, currentMusic])
 	const { meta, lyrics, translationLyrics } = LyricManager.useLyricState()
 	// console.log('lyrics', lyrics)
 	const currentLrcItem = LyricManager.useCurrentLyric()
@@ -278,11 +285,7 @@ export default function Lyric(_props: IProps) {
 	return (
 		<>
 			<View style={styles.fwflex1}>
-				{loading ? (
-					<View style={styles.fwflex1}>
-						<ActivityIndicator size="large" color={colors.loading} />
-					</View>
-				) : lyrics?.length ? (
+				{rawLyric?.trim() && lyrics?.length ? (
 					<LyricFlatList
 						key={layoutKey}
 						ref={(_) => {
@@ -313,7 +316,15 @@ export default function Lyric(_props: IProps) {
 					/>
 				) : (
 					<View style={styles.fullCenter}>
-						<Text style={[styles.white, fontSizeStyle]}>{i18n.t('commentsFeature.noLyrics')}</Text>
+						{loading && <ActivityIndicator size="large" color={colors.loading} />}
+						<Text style={[styles.white, fontSizeStyle]}>{i18n.t(`commentsFeature.${loading ? 'lyricsLoading' : lyricsStatus.status === 'instrumental' ? 'lyricsInstrumental' : lyricsStatus.status === 'error' ? 'lyricsFailed' : 'lyricsUnavailable'}`)}</Text>
+						{!loading && lyricsStatus.status === 'error' && lyricsStatus.retryable && (
+							<Pressable accessibilityRole="button" onPress={async () => {
+								await myTrackPlayer.retryCurrentLyrics()
+							}}>
+								<Text style={styles.searchLyric}>{i18n.t('commentsFeature.retry')}</Text>
+							</Pressable>
+						)}
 					</View>
 				)}
 			</View>

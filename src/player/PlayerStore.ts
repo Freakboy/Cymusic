@@ -31,6 +31,11 @@ export const importedLocalMusicStore = new GlobalState<IMusic.IMusicItem[] | []>
 export const nowLyricState = new GlobalState<string>(null)
 /** 当前歌词译文 */
 export const nowTranslationLyricState = new GlobalState<string>(null)
+export type LyricsStatus = {
+	status: 'idle' | 'loading' | 'available' | 'instrumental' | 'unavailable' | 'error'
+	retryable: boolean
+}
+export const lyricsStatusStore = new GlobalState<LyricsStatus>({ status: 'idle', retryable: false })
 /** 切歌中的按钮方向 */
 export const trackSkipLoadingStore = new GlobalState<'next' | 'previous' | null>(null)
 /** 当前曲目音源解析中 */

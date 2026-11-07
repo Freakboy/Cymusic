@@ -77,6 +77,7 @@ function managerRuntime() {
 	const listeners = new Map(), settings = new Map([['lyric.delaySeconds', 2]])
 	const track = { id: 'song', platform: 'tx', title: 'Song' }
 	const original = new State('[00:10]First\n[00:14]Second')
+	const translation = new State(null)
 	let position = 0
 	const player = {
 		getCurrentMusic: () => track,
@@ -92,9 +93,9 @@ function managerRuntime() {
 		'@rntp/player': { Event: { PlaybackProgressUpdated: 'progress', MediaItemTransition: 'transition' },
 			addEventListener: (name, callback) => { listeners.set(name, callback); return { remove() {} } },
 			getActiveMediaItem: () => track },
-		'./trackPlayerIndex': { __esModule: true, default: player, nowLyricState: original, nowTranslationLyricState: new State(null) },
+		'./trackPlayerIndex': { __esModule: true, default: player, nowLyricState: original, nowTranslationLyricState: translation },
 	}).default
-	return { api, track, original, settings,
+	return { api, track, original, translation, settings,
 		setPosition: (value) => { position = value },
 		emit: (name, data) => listeners.get(name)(data) }
 }
@@ -132,6 +133,26 @@ await suite.check('phone progress uses position rather than buffer and rebuilds 
 	await h.api.refreshLyric()
 	assert.equal(h.api.getCurrentLyric(), null)
 	assert.equal(h.settings.get('lyric.delaySeconds'), 3)
+})
+
+await suite.check('empty original clears the real manager parser and current line without fake lyrics or translation-only rows', async () => {
+	const h = managerRuntime()
+	h.setPosition(16)
+	await h.api.refreshLyric()
+	assert.equal(h.api.getCurrentLyric()?.lrc, 'Second')
+	for (const empty of [null, '', ' \n ']) {
+		h.original.setValue(empty)
+		h.translation.setValue('[00:00]Translation without original')
+		await h.api.refreshLyric()
+		assert.deepEqual(plain(h.api.getLyricState().lyrics), [])
+		assert.equal(h.api.getLyricState().lyricParser, undefined)
+		assert.equal(h.api.getCurrentLyric(), null)
+		h.emit('progress', { mediaId: 'song', position: 30, duration: 50 })
+		assert.equal(h.api.getCurrentLyric(), null)
+	}
+	h.original.setValue('[00:05]Recovered while paused')
+	await h.api.refreshLyric()
+	assert.equal(h.api.getCurrentLyric()?.lrc, 'Recovered while paused')
 })
 
 await suite.check('Bluetooth title projection uses the real bridge and the same positive delay/offset boundaries', async () => {
@@ -185,8 +206,11 @@ await suite.check('phone scroll targets the highlighted row and tap seeks to its
 			View: 'View', Text: 'Text', ActivityIndicator: 'ActivityIndicator' },
 		'@/constants/tokens': {}, '@/hooks/useAppTheme': { useThemeColors: () => ({}) },
 		'@/helpers/lyricManager': { useLyricState: () => lyricState, getLyricState: () => lyricState,
-			useCurrentLyric: () => current, getCurrentLyric: () => current },
-		'@/helpers/trackPlayerIndex': { seekTo: (time) => seeks.push(time), play: async () => {} },
+			useCurrentLyric: () => current, getCurrentLyric: () => current, refreshLyric: async () => {} },
+		'@/helpers/trackPlayerIndex': { seekTo: (time) => seeks.push(time), play: async () => {},
+			useCurrentMusic: () => parser.getCurrentMusicItem(),
+			nowLyricState: { useValue: () => 'original' }, nowTranslationLyricState: { useValue: () => null },
+			lyricsStatusStore: { useValue: () => ({ status: 'available', retryable: false }) } },
 		'@/hooks/useDelayFalsy': () => [undefined, () => {}],
 		'@/store/PersistStatus': { useValue: (_, fallback) => fallback },
 		'@/locales/commentsFeature': { t: (key) => key }, '@/utils/delay': async () => {},
@@ -214,6 +238,54 @@ await suite.check('phone scroll targets the highlighted row and tap seeks to its
 		assert.equal(seeks.at(-1), lyrics[index].time + 3)
 		assert.equal(parser.getPosition(seeks.at(-1)).index, index)
 	}
+})
+
+await suite.check('lyric UI renders distinct empty states and only explicit retryable error presses request lyrics', async () => {
+	let status = { status: 'loading', retryable: false }, retryCalls = 0, refreshCalls = 0
+	const effects = []
+	const react = {
+		createElement: (type, props, ...children) => ({ type, props: { ...props, children } }),
+		useMemo: (fn) => fn(), useCallback: (fn) => fn, useRef: (value) => ({ current: value }),
+		useEffect: (fn) => effects.push(fn),
+	}
+	const Lyric = loadModule('src/components/lyric/index.tsx', {
+		react,
+		'react-native': { StyleSheet: { create: (value) => value }, useWindowDimensions: () => ({ width: 400, fontScale: 1 }),
+			View: 'View', Text: 'Text', ActivityIndicator: 'ActivityIndicator', Pressable: 'Pressable' },
+		'@/constants/tokens': {}, '@/hooks/useAppTheme': { useThemeColors: () => ({}) },
+		'@/helpers/lyricManager': { useLyricState: () => ({ lyrics: [] }), useCurrentLyric: () => null,
+			getLyricState: () => ({ lyrics: [] }), refreshLyric: async () => { refreshCalls++ } },
+		'@/helpers/trackPlayerIndex': {
+			lyricsStatusStore: { useValue: () => status }, nowLyricState: { useValue: () => null },
+			nowTranslationLyricState: { useValue: () => null }, useCurrentMusic: () => null,
+			retryCurrentLyrics: async () => { retryCalls++; status = { status: 'loading', retryable: false } },
+		},
+		'@/hooks/useDelayFalsy': () => [undefined, () => {}],
+		'@/store/PersistStatus': { useValue: (_, fallback) => fallback },
+		'@/locales/commentsFeature': { t: (key) => key }, '@/utils/delay': async () => {},
+		'@/utils/trackUtils': { musicIsPaused: () => true }, '@rntp/player': { useIsPlaying: () => false },
+		'react-native-gesture-handler': { FlatList: 'FlatList' }, '../../utils/rpx': (value) => value,
+		'./lyricItem': 'LyricItem',
+	}).default
+	const nodes = (tree) => !tree || typeof tree !== 'object' ? [] : [tree, ...tree.props.children.flat(Infinity).flatMap(nodes)]
+	for (const [value, key, retryable] of [
+		['loading', 'lyricsLoading', false], ['instrumental', 'lyricsInstrumental', false],
+		['unavailable', 'lyricsUnavailable', false], ['error', 'lyricsFailed', false], ['error', 'lyricsFailed', true],
+	]) {
+		status = { status: value, retryable }
+		const tree = nodes(Lyric({}))
+		assert(tree.some((node) => node.type === 'Text' && node.props.children.includes(`commentsFeature.${key}`)))
+		assert.equal(tree.some((node) => node.type === 'ActivityIndicator'), value === 'loading')
+		assert.equal(tree.some((node) => node.type === 'Pressable'), retryable)
+		for (const effect of effects.splice(0)) effect()
+		assert.equal(retryCalls, 0, 'Renders and refresh effects must not retry the network')
+		if (retryable) {
+			await tree.find((node) => node.type === 'Pressable').props.onPress()
+			assert.equal(retryCalls, 1)
+			assert(nodes(Lyric({})).some((node) => node.type === 'ActivityIndicator'))
+		}
+	}
+	assert(refreshCalls > 0, 'Raw lyric effects rebuild the parser even while paused')
 })
 
 suite.finish()

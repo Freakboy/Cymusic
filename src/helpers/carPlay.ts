@@ -48,13 +48,13 @@ function createBridge(native: typeof NowPlaying | null, onDispose: () => void) {
 	let lyricSource: string | null = null
 	let lyricDelay = 0
 	let lyricParser: LyricParser | null = null
-	let projectedTitle: string | null = null
-	const restoreTitle = () => {
+	let projectedMetadata: string | null = null
+	const restoreMetadata = () => {
 		const track = currentMusicStore.getValue()
-		if (projectedTitle && track && myTrackPlayer.isCurrentNativeItem(NativePlayer.getActiveMediaItem())) {
-			NativePlayer.updateMetadata(0, { title: track.title })
+		if (projectedMetadata !== null && track && myTrackPlayer.isCurrentNativeItem(NativePlayer.getActiveMediaItem())) {
+			NativePlayer.updateMetadata(0, { title: track.title || '', artist: track.artist || '', albumTitle: track.album || '' })
 		}
-		projectedTitle = null
+		projectedMetadata = null
 	}
 	const inFlight = new Set<string>()
 	const report = (error: unknown) => logError('CarPlay bridge', error)
@@ -130,7 +130,7 @@ function createBridge(native: typeof NowPlaying | null, onDispose: () => void) {
 		}
 		if (key === 'music.bluetoothLyrics') {
 			lyricTitleEnabled = PersistStatus.get('music.bluetoothLyrics') === true
-			if (!lyricTitleEnabled) restoreTitle()
+			if (!lyricTitleEnabled) restoreMetadata()
 		}
 	}) : undefined
 	const appState = native ? AppState.addEventListener('change', (state) => {
@@ -140,7 +140,7 @@ function createBridge(native: typeof NowPlaying | null, onDispose: () => void) {
 		}
 	}) : undefined
 
-	// Opt-in LRC line projection through the documented title field. There is no
+	// Opt-in LRC line projection through the documented title/artist fields. There is no
 	// public synchronized Bluetooth-lyrics API or guarantee of accessory display.
 	const timer = native ? setInterval(() => {
 		if (!lyricTitleEnabled || disposed) return
@@ -149,7 +149,7 @@ function createBridge(native: typeof NowPlaying | null, onDispose: () => void) {
 			lyricTrack = track
 			lyricSource = null
 			lyricParser = null
-			projectedTitle = null
+			projectedMetadata = null
 		}
 		if (!myTrackPlayer.isCurrentNativeItem(NativePlayer.getActiveMediaItem())) return
 		const source = nowLyricState.getValue()
@@ -161,12 +161,18 @@ function createBridge(native: typeof NowPlaying | null, onDispose: () => void) {
 		}
 		const text = lyricParser?.getPosition(myTrackPlayer.getProgress().position).lrc?.lrc || null
 		const title = text || track?.title || ''
-		if (title !== projectedTitle) {
+		const metadata = {
+			title,
+			artist: [track?.title?.trim(), track?.artist?.trim()].filter(Boolean).join(' - '),
+			albumTitle: track?.album || '',
+		}
+		const signature = JSON.stringify(metadata)
+		if (signature !== projectedMetadata) {
 			// RNTP owns Now Playing and re-anchors elapsed/rate on metadata writes.
 			// Slot 0 is still this owned item; a native advance to slot 1 cannot
 			// apply an old line to the new song while JS handles the transition.
-			NativePlayer.updateMetadata(0, { title })
-			projectedTitle = title
+			NativePlayer.updateMetadata(0, metadata)
+			projectedMetadata = signature
 		}
 	}, 500) : undefined
 	lyricTitleEnabled = PersistStatus.get('music.bluetoothLyrics') === true
@@ -178,7 +184,7 @@ function createBridge(native: typeof NowPlaying | null, onDispose: () => void) {
 			if (disposed) return
 			lyricTitleEnabled = enabled
 			PersistStatus.set('music.bluetoothLyrics', enabled)
-			if (!enabled) restoreTitle()
+			if (!enabled) restoreMetadata()
 		},
 		dispose() {
 			if (disposed) return
@@ -187,7 +193,7 @@ function createBridge(native: typeof NowPlaying | null, onDispose: () => void) {
 			subscription?.remove()
 			storage?.remove()
 			appState?.remove()
-			restoreTitle()
+			restoreMetadata()
 			onDispose()
 		},
 	}

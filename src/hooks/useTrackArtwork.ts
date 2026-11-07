@@ -1,0 +1,86 @@
+import { useEffect, useRef, useState } from 'react'
+import { useFlashListContext } from '@shopify/flash-list'
+import { unknownTrackImageUri } from '@/constants/images'
+import { ArtworkTrack, repairNeteaseArtwork, updateTrackArtwork } from '@/helpers/neteaseArtwork'
+import { getFullArtwork, getThumbnailArtwork, neteaseArtworkKey, usableArtwork } from '@/utils/imageUtils'
+
+function isVisibleTrack(track: ArtworkTrack, list: ReturnType<typeof useFlashListContext<ArtworkTrack>>) {
+	const ref = list?.getRef()
+	if (!ref) return false
+	const { startIndex, endIndex } = ref.computeVisibleIndices()
+	for (let index = startIndex; index <= endIndex; index++) {
+		const item = ref.props.data?.[index]
+		if (neteaseArtworkKey(track) && neteaseArtworkKey(item) === neteaseArtworkKey(track)) return true
+	}
+	return false
+}
+
+/** Recycled/pre-rendered cells may be mounted outside the visible range. */
+export function useTrackArtwork(
+	track: ArtworkTrack | null | undefined,
+	current = false,
+	options: { fullSize?: boolean; onConfirmed?: (track: ArtworkTrack, uri: string) => void } = {},
+) {
+	const id = track?.id
+	const platform = track?.platform
+	const artwork = track?.artwork
+	const list = useFlashListContext<ArtworkTrack>()
+	const visibilityKey = neteaseArtworkKey(track) ?? `${platform}:${id}`
+	const [visibility, setVisibility] = useState({ key: visibilityKey, value: false })
+	const visible = !!track && (current || (visibility.key === visibilityKey && visibility.value))
+	const identity = `${visibilityKey}:${artwork ?? ''}`
+	const [state, setState] = useState({ identity, uri: usableArtwork(artwork), repaired: false })
+	const displayed = state.identity === identity ? state : { identity, uri: usableArtwork(artwork), repaired: false }
+	const attempt = useRef({ identity, failed: new Set<string>(), exhausted: false })
+	if (attempt.current.identity !== identity) attempt.current = { identity, failed: new Set(), exhausted: false }
+	const imageToken = `${identity}:${displayed.uri ?? ''}`
+	const activeImage = useRef(imageToken)
+	activeImage.current = imageToken
+	useEffect(() => {
+		activeImage.current = imageToken
+		return () => { activeImage.current = '' }
+	}, [imageToken])
+
+	useEffect(() => {
+		if (current || !neteaseArtworkKey({ id, platform })) return
+		const check = () => {
+			const value = isVisibleTrack({ id, platform }, list)
+			setVisibility(previous => previous.key === visibilityKey && previous.value === value
+				? previous : { key: visibilityKey, value })
+		}
+		check()
+		const timer = setInterval(check, 500)
+		return () => clearInterval(timer)
+	}, [list, current, id, platform, visibilityKey])
+
+	useEffect(() => {
+		const session = attempt.current
+		if (!visible) { session.exhausted = false; return }
+		if (displayed.uri || !neteaseArtworkKey({ id, platform }) || session.exhausted) return
+		if (!current && !isVisibleTrack({ id, platform }, list)) return
+		let cancelled = false
+		void repairNeteaseArtwork({ id, platform, artwork }, [...session.failed]).then(result => {
+			if (cancelled || attempt.current !== session) return
+			session.exhausted = !result.artwork
+			setState({ identity, uri: result.artwork || undefined, repaired: !!result.artwork })
+		})
+		return () => { cancelled = true }
+	}, [visible, current, list, displayed.uri, identity, id, platform, artwork])
+
+	const uri = displayed.uri
+		? (options.fullSize ? getFullArtwork(displayed.uri)! : getThumbnailArtwork(displayed.uri)!)
+		: unknownTrackImageUri
+	return {
+		source: { uri },
+		onError: () => {
+			if (!displayed.uri || activeImage.current !== imageToken) return
+			attempt.current.failed.add(displayed.uri)
+			setState({ identity, uri: undefined, repaired: false })
+		},
+		onLoad: () => {
+			if (!track || !displayed.uri || activeImage.current !== imageToken) return
+			if (displayed.repaired) updateTrackArtwork(track, displayed.uri)
+			if (current) options.onConfirmed?.(track, displayed.uri)
+		},
+	}
+}

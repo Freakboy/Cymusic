@@ -98,7 +98,7 @@ async function resolvePlaylistReference(input: string, preferredPlatform?: Remot
 	}
 }
 
-async function requestJson(url: string, headers?: Record<string, string>) {
+export async function requestJson(url: string, headers?: Record<string, string>) {
 	const controller = new AbortController()
 	const timer = setTimeout(() => controller.abort(), 20000)
 	try {
@@ -139,7 +139,7 @@ function remoteArtwork(...values: unknown[]): string {
 	return ''
 }
 
-function neteaseImage(...ids: unknown[]): string {
+export function neteaseImage(...ids: unknown[]): string {
 	const id = ids.find(value => (typeof value === 'string' && /^[0-9]+$/.test(value) && /[1-9]/.test(value))
 		|| (typeof value === 'number' && Number.isSafeInteger(value) && value > 0))
 	if (id == null) return ''
@@ -153,11 +153,11 @@ function neteaseImage(...ids: unknown[]): string {
 
 export function normalizeNeteaseSong(song: any): IMusic.IMusicItem {
 	const artists = song.ar ?? song.artists
-	const album = song.al ?? song.album
+	const album = { ...song.album, ...song.al }
 	return {
 		id: String(song.id), platform: 'Netease', title: song.name || '未知歌曲',
 		artist: Array.isArray(artists) ? artists.map((item: any) => item.name).filter(Boolean).join('、') : '未知歌手',
-		album: album?.name || '未知专辑', artwork: remoteArtwork(album?.picUrl, song.album?.picUrl)
+		album: album?.name || song.album?.name || '未知专辑', artwork: remoteArtwork(album?.picUrl, song.album?.picUrl)
 			|| neteaseImage(album?.pic_str, album?.picId_str, album?.picId, album?.pic,
 				song.album?.pic_str, song.album?.picId_str, song.album?.picId, song.album?.pic),
 		duration: Math.round((song.dt ?? song.duration ?? 0) / 1000), url: 'Unknown',

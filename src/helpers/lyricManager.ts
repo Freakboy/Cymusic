@@ -23,7 +23,6 @@ const lyricStateStore = new GlobalState<{
 
 const currentLyricStore = new GlobalState<ILyric.IParsedLrcItem | null>(null)
 export const durationStore = new GlobalState<number>(0)
-const DEFAULT_LYRIC = '[00:00.00]暂无歌词'
 let lastRawLyric = ''
 let lastRawTranslation = ''
 let lastLyricDelaySeconds: number | null = null
@@ -43,10 +42,7 @@ function resetLyricState() {
 		lyrics: [],
 		hasTranslation: false,
 	})
-	currentLyricStore.setValue({
-		lrc: 'MusicFree',
-		time: 0,
-	})
+	currentLyricStore.setValue(null)
 	lastRawLyric = ''
 	lastRawTranslation = ''
 	lastLyricDelaySeconds = null
@@ -54,7 +50,7 @@ function resetLyricState() {
 
 function getLyricSource(): ILyric.ILyricSource {
 	return {
-		rawLrc: nowLyricState.getValue() || DEFAULT_LYRIC,
+		rawLrc: nowLyricState.getValue() || '',
 		translation: nowTranslationLyricState.getValue() || undefined,
 	}
 }
@@ -100,7 +96,11 @@ async function refreshLyric(fromStart?: boolean, forceRequest = false, positionO
 
 		const lyricDelaySeconds = PersistStatus.get('lyric.delaySeconds') ?? 0
 		const lrcSource = getLyricSource()
-		const rawLrc = lrcSource.rawLrc || DEFAULT_LYRIC
+		const rawLrc = lrcSource.rawLrc || ''
+		if (!rawLrc.trim()) {
+			resetLyricState()
+			return
+		}
 		const rawTranslation = lrcSource.translation || ''
 		const lyricParser = lyricStateStore.getValue().lyricParser
 
@@ -173,7 +173,7 @@ const progressSubscription = ReactNativeTrackPlayer.addEventListener(Event.Playb
 	}
 
 	const lyricParser = lyricStateStore.getValue().lyricParser
-	const rawLrc = nowLyricState.getValue() || DEFAULT_LYRIC
+	const rawLrc = nowLyricState.getValue() || ''
 	const rawTranslation = nowTranslationLyricState.getValue() || ''
 	const lyricDelaySeconds = PersistStatus.get('lyric.delaySeconds') ?? 0
 	const parserReady =

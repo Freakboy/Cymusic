@@ -1,6 +1,7 @@
 // Runs the real fetchCurrentLyrics through the player facade and real source helper.
 import { createFixture, item } from './file-system-fixture.mjs'
-import { assert, checks, deferred } from './native-services-fixture.mjs'
+import { assert, checks, deferred, loadModule } from './native-services-fixture.mjs'
+import { fakeClock } from './request-fixture.mjs'
 
 const fixture = createFixture(),
 	suite = checks()
@@ -13,12 +14,12 @@ const song = (id = '00000000000001', extra = {}) =>
 		artist: 'Artist',
 		...extra,
 	})
-function runtime() {
+function runtime({ platformApi } = {}) {
 	const sourceCalls = [],
 		platformCalls = [],
 		searches = [],
 		writes = []
-	let platform = async () => ({ lyric: '[00:01]Line', tlyric: '[00:01]Platform translation' })
+	let platform = platformApi || (async () => ({ lyric: '[00:01]Line', tlyric: '[00:01]Platform translation' }))
 	let source = async () => ({ lyric: '[00:01]Line', tlyric: '[00:01]Source translation' })
 	let match = async () => ({
 		data: {
@@ -49,7 +50,7 @@ function runtime() {
 			cancelPreparedNextTrack() {},
 			setCurrentStreamPriority() {},
 			isPreparedNextTrackValid: () => false,
-			withSourceRuntimeLock: (...args) => lock(...args),
+			withSourceRuntimeLock: (...args) => facadeLock(...args),
 		},
 		'@/helpers/userApi/getMusicSource': {
 			myGetLyric: (track) => {
@@ -65,7 +66,12 @@ function runtime() {
 		},
 	}
 	const h = fixture.runtime({ moduleOverrides: overrides })
+	h.player.replaceMediaItem = (index, track) => {
+		h.calls.player.push(['replace', index, track])
+		h.player.queue[index] = track
+	}
 	const lock = h.load('src/player/sourceResolver/runtime.ts').withSourceRuntimeLock
+	let facadeLock = lock
 	const api = {
 		id: 'source',
 		scriptType: 'lxmusic',
@@ -94,6 +100,7 @@ function runtime() {
 		platformCalls,
 		searches,
 		writes,
+		setRuntimeLock: (fn) => { facadeLock = fn },
 		setSource: (fn) => {
 			source = fn
 		},
@@ -109,6 +116,163 @@ function runtime() {
 		},
 	}
 }
+
+// Keep both platform owners real; only HTTP/clock boundaries are controlled.
+function officialPlatform(initialReply) {
+	const calls = [], clock = fakeClock()
+	let reply = initialReply
+	class ClockDate extends Date { static now() { return clock.now } }
+	const helper = loadModule('src/helpers/userApi/neteaseLyrics.ts', {}, {
+		...clock, Date: ClockDate,
+		fetch: async (url, init) => {
+			calls.push({ url, init })
+			return { ok: true, json: async () => typeof reply === 'function' ? reply(url) : reply }
+		},
+	})
+	const { myGetLyric } = loadModule('src/helpers/userApi/getMusicSource.ts', {
+		'./neteaseLyrics': helper,
+		'@/components/utils': { b64DecodeUnicode: (text) => text, decodeName: (text) => text },
+		'@/components/utils/musicSdk/options.js': {}, '@/components/utils/musicSdk/utils': {},
+		'@/components/utils/request': { httpFetch() { throw new Error('Unexpected QQ lyric fallback') } },
+		'@/constants/images': {}, '@/helpers/userApi/qq-music-api': {},
+		'@/locales/commentsFeature': { t: () => '暂无歌词' }, axios: {}, 'react-native': {},
+		'../logger': { logError() {}, logInfo() {} },
+	})
+	return { myGetLyric, calls, clock, setReply: (value) => { reply = value } }
+}
+
+await suite.check('real platform facade preserves original NetEase IDs and distinct terminal states across aliases', async () => {
+	for (const platform of ['Netease', 'wy', 'netease', '163']) {
+		for (const [reply, status, lyric] of [
+			[{ code: 200, lrc: { lyric: '[00:01]Official' } }, 'available', '[00:01]Official'],
+			[{ code: 200, pureMusic: true }, 'instrumental', null],
+			[{ code: 200, uncollected: true }, 'unavailable', null],
+			[{ code: 403 }, 'error', null],
+		]) {
+			const official = officialPlatform(reply), h = runtime({ platformApi: official.myGetLyric })
+			h.stores.musicApiSelectedStore.setValue(null)
+			await h.play(song('186016', { platform }))
+			assert.equal(h.stores.lyricsStatusStore.getValue().status, status)
+			assert.equal(h.stores.lyricsStatusStore.getValue().retryable, false)
+			assert.equal(h.stores.nowLyricState.getValue(), lyric)
+			assert.match(official.calls[0].url, /id=186016&/)
+			assert.equal(h.searches.length, 0)
+			const before = official.calls.length
+			await h.facade.retryCurrentLyrics()
+			assert.equal(official.calls.length, before, 'Only retryable errors can retry')
+		}
+	}
+})
+
+await suite.check('real facade retries both official endpoints after failure without audio, queue or progress writes', async () => {
+	const official = officialPlatform({ code: 500 }), h = runtime({ platformApi: official.myGetLyric })
+	h.stores.musicApiSelectedStore.setValue(null)
+	await h.play(song('186016', { platform: 'wy' }))
+	assert.deepEqual(h.stores.lyricsStatusStore.getValue(), { status: 'error', retryable: true })
+	assert.equal(official.calls.length, 2)
+	const response = deferred()
+	official.setReply(() => response.promise)
+	const queue = h.player.queue.slice(), audioCalls = h.calls.player.length, writes = h.calls.writes.length
+	let settled = false
+	const retry = h.facade.retryCurrentLyrics().then(() => { settled = true })
+	await flush()
+	assert.equal(settled, false, 'The public promise must wait for lyrics')
+	assert.equal(h.stores.lyricsStatusStore.getValue().status, 'loading')
+	assert.equal(official.calls.length, 3, 'Error must not be cached')
+	await h.facade.retryCurrentLyrics()
+	assert.equal(official.calls.length, 3, 'Repeated taps while loading must not start work')
+	response.resolve({ code: 200, lrc: { lyric: '[00:02]Recovered' } })
+	await retry
+	assert.equal(h.stores.nowLyricState.getValue(), '[00:02]Recovered')
+	assert.equal(h.stores.lyricsStatusStore.getValue().status, 'available')
+	assert.deepEqual(h.player.queue, queue)
+	assert.equal(h.calls.player.length, audioCalls)
+	assert.equal(h.calls.writes.length, writes, 'Retry must not change persisted progress or audio metadata')
+	assert.equal(official.clock.pending, 0)
+})
+
+await suite.check('source failure falls back through both real official endpoints using the original native ID', async () => {
+	const official = officialPlatform((url) => url.includes('/v1?') ? { code: 500 } : {
+		code: 200, lrc: { lyric: '[00:03]Official fallback' },
+	})
+	const h = runtime({ platformApi: official.myGetLyric })
+	h.setSource(async () => { throw new Error('Source offline') })
+	await h.play(song('186016', { platform: 'Netease' }))
+	assert.equal(h.sourceCalls.length, 1)
+	assert.equal(h.platformCalls.length, 1)
+	assert.equal(official.calls.length, 2)
+	for (const { url } of official.calls) assert.match(url, /music\.163\.com\/api\/song\/lyric(?:\/v1)?\?id=186016&/)
+	assert.equal(h.stores.nowLyricState.getValue(), '[00:03]Official fallback')
+	assert.deepEqual(h.stores.lyricsStatusStore.getValue(), { status: 'available', retryable: false })
+})
+
+await suite.check('real NetEase terminal states and errors never replace a successful partial source', async () => {
+	for (const reply of [{ code: 500 }, { code: 200, pureMusic: true }, { code: 200, uncollected: true }]) {
+		const official = officialPlatform(reply), h = runtime({ platformApi: official.myGetLyric })
+		h.setSource(async () => ({ lyric: '[00:02]Source wins' }))
+		await h.play(song('186016', { platform: 'wy' }))
+		assert.equal(h.stores.nowLyricState.getValue(), '[00:02]Source wins')
+		assert.deepEqual(h.stores.lyricsStatusStore.getValue(), { status: 'available', retryable: false })
+		const calls = official.calls.length
+		await h.facade.retryCurrentLyrics()
+		assert.equal(official.calls.length, calls)
+	}
+})
+
+await suite.check('real official late retry cannot overwrite a new song or reset state', async () => {
+	for (const boundary of ['track', 'reset']) {
+		const official = officialPlatform({ code: 500 }), h = runtime({ platformApi: official.myGetLyric })
+		h.stores.musicApiSelectedStore.setValue(null)
+		await h.play(song('186016', { platform: 'netease' }))
+		const old = deferred()
+		official.setReply((url) => url.includes('id=186016&') ? old.promise : { code: 200, pureMusic: true })
+		const retry = h.facade.retryCurrentLyrics()
+		await flush()
+		if (boundary === 'track') await h.play(song('5308028', { platform: 'wy' }))
+		else h.facade.reset()
+		assert.equal(h.stores.lyricsStatusStore.getValue().status, boundary === 'track' ? 'instrumental' : 'idle', boundary)
+		const before = h.writes.length
+		old.resolve({ code: 200, lrc: { lyric: '[00:01]Late' } })
+		await retry
+		assert.equal(h.writes.length, before, JSON.stringify({ boundary, writes: h.writes.slice(before) }))
+		assert.equal(h.stores.nowLyricState.getValue(), null)
+		assert.equal(h.stores.lyricsStatusStore.getValue().status, boundary === 'track' ? 'instrumental' : 'idle')
+	}
+})
+
+await suite.check('independent lyric sequence rejects late same-song work even with an identical native token', async () => {
+	const h = runtime(), old = deferred(), now = Date.now, random = Math.random
+	h.stores.musicApiSelectedStore.setValue(null)
+	h.setPlatform(() => old.promise)
+	try {
+		Date.now = () => 123456789
+		Math.random = () => 0.5
+		await h.play()
+		const token = h.player.queue[0].extras.cymusic.token
+		h.setPlatform(async () => ({ lyric: '[00:01]Newest', status: 'available' }))
+		await h.play()
+		assert.equal(h.player.queue[0].extras.cymusic.token, token)
+		const before = h.writes.length
+		old.resolve({ lyric: '[00:01]Stale', status: 'available' })
+		await flush()
+		assert.equal(h.writes.length, before)
+		assert.equal(h.stores.nowLyricState.getValue(), '[00:01]Newest')
+	} finally {
+		Date.now = now
+		Math.random = random
+	}
+})
+
+await suite.check('legacy fake no-lyrics LRC is never published to lyric consumers', async () => {
+	for (const text of ['暂无歌词', 'No lyrics available']) {
+		const h = runtime()
+		h.stores.musicApiSelectedStore.setValue(null)
+		h.setPlatform(async () => ({ lyric: `[00:00.00]${text}`, tlyric: '' }))
+		await h.play()
+		assert.equal(h.stores.nowLyricState.getValue(), null)
+		assert.deepEqual(h.stores.lyricsStatusStore.getValue(), { status: 'error', retryable: true })
+	}
+})
 
 await suite.check('current source complete lyrics win without platform fetch', async () => {
 	const h = runtime()
@@ -350,15 +514,172 @@ await suite.check(
 			'Source original must be visible while platform translation is pending',
 		)
 		assert.equal(h.stores.nowTranslationLyricState.getValue(), null)
+		h.setPlatform(async () => ({ lyric: '[00:01]Line', tlyric: '[00:01]Current translation' }))
 		await h.facade.setMusicApiAsSelectedById('other')
 		await h.facade.setMusicApiAsSelectedById(h.api.id)
+		await flush()
 		assert.equal(h.stores.musicApiSelectedStore.getValue().id, h.api.id)
+		assert.equal(h.stores.nowTranslationLyricState.getValue(), '[0:1.000]Current translation')
+		assert.equal(h.stores.lyricsStatusStore.getValue().status, 'available')
 		const before = h.writes.length
 		pending.resolve({ lyric: '[00:01]Late platform', tlyric: '[00:01]Late translation' })
 		await flush()
 		assert.equal(h.writes.length, before)
 	},
 )
+
+await suite.check('switch/delete converge pending source lyrics while paused without touching native playback', async () => {
+	for (const change of ['switch', 'delete']) {
+		const h = runtime(), old = deferred()
+		h.setSource(() => old.promise)
+		h.stores.musicApiStore.setValue([h.api, {
+			id: 'replacement',
+			script: `module.exports = {
+				getMusicUrl: async () => 'https://example.test/unused',
+				getLyric: async () => ({ lyric: '[00:02]Replacement', tlyric: '[00:02]Replacement translation' })
+			}`,
+		}])
+		h.setPlatform(async () => ({ lyric: '[00:03]Platform after delete', status: 'available' }))
+		await h.play()
+		assert.equal(h.sourceCalls.length, 1)
+		assert.equal(h.stores.lyricsStatusStore.getValue().status, 'loading')
+		h.facade.pause()
+		const queue = h.player.queue.slice(), audioCalls = h.calls.player.length, persistWrites = h.calls.writes.length
+		const changing = change === 'switch'
+			? h.facade.setMusicApiAsSelectedById('replacement')
+			: h.facade.deleteMusicApiById(h.api.id)
+		// Expire the helper's bounded lock ownership, leaving the actual old request pending.
+		h.calls.timers.find(({ delay }) => delay === 5000).callback()
+		await changing
+		await flush()
+		const expected = change === 'switch' ? '[00:02]Replacement' : '[00:03]Platform after delete'
+		assert.equal(h.stores.lyricsStatusStore.getValue().status, 'available', change)
+		assert.equal(h.stores.nowLyricState.getValue(), expected)
+		assert.equal(h.platformCalls.length, change === 'switch' ? 0 : 1)
+		assert.deepEqual(h.player.queue, queue)
+		assert.equal(h.calls.player.length, audioCalls, 'No play, seek, clear or queue rebuild')
+		assert(!h.calls.writes.slice(persistWrites).some(({ key }) => key === 'music.progress'))
+		assert.equal(h.stores.playbackIntentStore.getValue(), 'pause')
+		const before = h.writes.length
+		old.resolve({ lyric: '[00:01]Old source', tlyric: '[00:01]Old translation' })
+		await flush()
+		assert.equal(h.writes.length, before)
+		assert.equal(h.stores.nowLyricState.getValue(), expected)
+	}
+})
+
+await suite.check('source selection and deletion cleanup failures still start platform lyrics and settle error status', async () => {
+	for (const change of ['switch', 'delete']) {
+		const h = runtime(), old = deferred()
+		h.setSource(() => old.promise)
+		h.stores.musicApiStore.setValue([h.api, { id: 'broken', script: 'invalid source' }])
+		h.setPlatform(async () => ({ lyric: '', status: 'error', retryable: true }))
+		await h.play()
+		assert.equal(h.stores.lyricsStatusStore.getValue().status, 'loading')
+		h.setRuntimeLock(async () => { throw new Error('Reload/cleanup failed') })
+		if (change === 'switch') await h.facade.setMusicApiAsSelectedById('broken')
+		else h.facade.deleteMusicApiById(h.api.id)
+		await flush()
+		assert.equal(h.platformCalls.length, 1)
+		assert.deepEqual(h.stores.lyricsStatusStore.getValue(), { status: 'error', retryable: true })
+		old.resolve({ lyric: '[00:01]Obsolete' })
+		await flush()
+		assert.equal(h.stores.nowLyricState.getValue(), null)
+		h.setPlatform(async () => ({ lyric: '[00:04]Retry', status: 'available' }))
+		await h.facade.retryCurrentLyrics()
+		assert.equal(h.stores.nowLyricState.getValue(), '[00:04]Retry')
+	}
+})
+
+await suite.check('explicit selected-source restoration restarts pending lyrics for an owned paused item', async () => {
+	const h = runtime(), old = deferred()
+	h.setSource(() => old.promise)
+	await h.play()
+	h.facade.pause()
+	const api = { id: 'restored', script: `module.exports = {
+		getMusicUrl: async () => 'https://example.test/unused',
+		getLyric: async () => ({ lyric: '[00:05]Restored', tlyric: '[00:05]Restored translation' })
+	}` }
+	h.persistence.set('music.musicApi', [api])
+	h.persistence.set('music.selectedMusicApi', api)
+	const queue = h.player.queue.slice()
+	const restoring = h.facade.setupTrackPlayer()
+	h.calls.timers.find(({ delay }) => delay === 5000).callback()
+	await restoring
+	await flush()
+	assert.equal(h.stores.nowLyricState.getValue(), '[00:05]Restored')
+	assert.equal(h.stores.lyricsStatusStore.getValue().status, 'available')
+	assert.deepEqual(h.player.queue, queue)
+	assert.equal(h.stores.playbackIntentStore.getValue(), 'pause')
+	const before = h.writes.length
+	old.resolve({ lyric: '[00:01]Old restoration' })
+	await flush()
+	assert.equal(h.writes.length, before)
+})
+
+await suite.check('explicit selected-source reload failure still converges pending lyrics through platform fallback', async () => {
+	const h = runtime(), old = deferred()
+	h.setSource(() => old.promise)
+	await h.play()
+	h.persistence.set('music.musicApi', [h.api])
+	h.persistence.set('music.selectedMusicApi', h.api)
+	h.setRuntimeLock(async () => { throw new Error('Restore failed') })
+	await assert.rejects(h.facade.setupTrackPlayer(), /Restore failed/)
+	await flush()
+	assert.equal(h.platformCalls.length, 1)
+	assert.equal(h.stores.nowLyricState.getValue(), '[00:01]Line')
+	assert.equal(h.stores.lyricsStatusStore.getValue().status, 'available')
+	const before = h.writes.length
+	old.resolve({ lyric: '[00:01]Old failed restoration' })
+	await flush()
+	assert.equal(h.writes.length, before)
+})
+
+await suite.check('obsolete switch/delete completion cannot refetch over a newer source selection', async () => {
+	for (const change of ['switch', 'delete']) {
+		const h = runtime(), cleanup = deferred()
+		await h.play()
+		h.stores.musicApiStore.setValue([h.api, ...['delayed', 'latest'].map((id) => ({
+			id, script: `module.exports = {
+				getMusicUrl: async () => 'unused',
+				getLyric: async () => ({ lyric: '[00:01]${id}', tlyric: '[00:01]translation' })
+			}`,
+		}))])
+		let operations = 0
+		h.setRuntimeLock(async (action) => {
+			if (++operations === 1) await cleanup.promise
+			return action()
+		})
+		const obsolete = change === 'switch'
+			? h.facade.setMusicApiAsSelectedById('delayed')
+			: h.facade.deleteMusicApiById(h.api.id)
+		await h.facade.setMusicApiAsSelectedById('latest')
+		await flush()
+		assert.equal(h.stores.nowLyricState.getValue(), '[00:01]latest')
+		const before = h.writes.length
+		cleanup.resolve()
+		await obsolete
+		await flush()
+		assert.equal(h.writes.length, before, change)
+		assert.equal(h.stores.lyricsStatusStore.getValue().status, 'available')
+	}
+})
+
+await suite.check('ordinary runtime reload and unowned source changes do not refetch lyrics', async () => {
+	const h = runtime()
+	await h.play()
+	await h.facade.reloadMusicApi({ ...h.api, isSelected: true })
+	await flush()
+	assert.equal(h.sourceCalls.length, 1)
+	assert.equal(h.platformCalls.length, 0)
+	h.stores.musicApiStore.setValue([h.api, { id: 'other', script: `module.exports.getMusicUrl = async () => 'unused'` }])
+	h.player.activeIndex = 1
+	await h.facade.setMusicApiAsSelectedById('other')
+	h.facade.deleteMusicApiById('other')
+	await flush()
+	assert.equal(h.sourceCalls.length, 1)
+	assert.equal(h.platformCalls.length, 0)
+})
 
 await fixture.dispose()
 suite.finish()

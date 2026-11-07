@@ -36,7 +36,7 @@
 			"songsNumsToLoad": "Songs Nums to Load"
 		},
 		"descriptions": {
-			"bluetoothLyrics": "Show only the current lyric in the system title. Restore the song name when lyrics are absent or disabled. Affects Lock Screen and CarPlay; accessory support varies.",
+			"bluetoothLyrics": "Show the current lyric as the system title and Song - Artist on the artist line, keeping the original album. Without a current lyric, show the song title. Disabling restores original fields. Affects Lock Screen and CarPlay; layout depends on the device.",
 			"preciseSeeking": "Helps keep audio and lyrics aligned after seeking in some FLAC files. Playback may wait for the full audio file to load. Applies after changing tracks."
 		},
 		"actions": {

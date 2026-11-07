@@ -73,6 +73,7 @@ function runtime() {
 		'../../modules/cymusic-native': h.nativeFs,
 		'@rntp/player': player,
 		'@/player/mediaItem': media,
+		'@/utils/imageUtils': h.load('src/utils/imageUtils.ts'),
 		'@/helpers/types': { MusicRepeatMode: { QUEUE: 'queue', SINGLE: 'single', SHUFFLE: 'shuffle' } },
 		'@/store/PersistStatus': h.persistence,
 		'@/store/playList': {
@@ -412,6 +413,40 @@ await suite.check('bound-playlist local additions and removals compare platform 
 	assert.equal(h.stores.playListsStore.getValue()[0].songs.length, 2)
 	h.facade.deleteSongFromStoredPlayList(playlist, b)
 	assert.equal(h.stores.playListsStore.getValue()[0].songs.length, 1)
+})
+
+await suite.check('SINGLE adopts only latest artwork from queue or current metadata, retaining prepared source and ownership', async () => {
+	for (const fromQueue of [true, false]) {
+		const h = runtime()
+		await h.facade.setupTrackPlayer()
+		const original = song('2010', { platform: 'wy', artwork: 'https://example.com/old.jpg' })
+		h.facade.addAll([original])
+		h.facade.setRepeatMode('single')
+		await h.facade.play(original)
+		await h.tick()
+		const prepared = h.player.queue[1]
+		const nextToken = prepared.extras.cymusic.token
+		const artwork = 'https://example.com/confirmed.jpg'
+		if (fromQueue) {
+			h.facade.getPlayList()[0] = { ...original, artwork, url: 'https://example.com/stale.mp3',
+				headers: { Authorization: 'wrong' }, cacheSourceId: 'wrong-cache' }
+		} else assert.equal(h.facade.updateCurrentArtwork({ id: 2010, platform: '163' }, artwork), true)
+		const items = h.count('items'), plays = h.count('play'), sources = h.sourceCalls.length
+		h.transition()
+		const adopted = h.facade.getCurrentMusic()
+		assert.equal(adopted.artwork, artwork)
+		assert.equal(adopted.url, 'file:///cache/2010.flac')
+		assert.equal(adopted.headers.Authorization, 'prepared')
+		assert.equal(adopted.cacheSourceId, 'prepared-source-v1-sha')
+		assert.equal(adopted.cacheQuality, 'flac')
+		assert.equal(h.player.queue[0].artworkUrl, artwork)
+		assert.equal(h.player.queue[0].extras.cymusic.token, nextToken)
+		assert.equal(h.player.progress.position, 2.75)
+		assert.equal(h.count('items'), items)
+		assert.equal(h.count('play'), plays)
+		assert.equal(h.sourceCalls.length, sources)
+		assert.equal(h.persistence.get('music.musicItem').artwork, artwork)
+	}
 })
 
 await fixture.dispose()

@@ -1,10 +1,9 @@
 import { TrackShortcutsMenu } from '@/components/TrackShortcutsMenu'
-import { unknownTrackImageUri } from '@/constants/images'
 import { ThemeColors } from '@/constants/tokens'
 import myTrackPlayer, { isCachedIconVisibleStore } from '@/helpers/trackPlayerIndex'
 import { useThemeColors } from '@/hooks/useAppTheme'
+import { useTrackArtwork } from '@/hooks/useTrackArtwork'
 import { useDefaultStyles } from '@/styles'
-import { getThumbnailArtwork } from '@/utils/imageUtils'
 import rpx from '@/utils/rpx'
 import { Entypo, Ionicons } from '@expo/vector-icons'
 import React, { memo, useEffect, useMemo, useState } from 'react'
@@ -58,12 +57,7 @@ const TracksListItem = ({
 			}) as IMusic.IMusicItem,
 		[track.id, track.platform, track.title, track.artist],
 	)
-	const artworkSource = useMemo(
-		() => ({
-			uri: getThumbnailArtwork(track.artwork) ?? unknownTrackImageUri,
-		}),
-		[track.artwork],
-	)
+	const artwork = useTrackArtwork(track, isActiveTrack, { onConfirmed: myTrackPlayer.updateCurrentArtwork })
 
 	useEffect(() => {
 		let isMounted = true
@@ -120,8 +114,11 @@ const TracksListItem = ({
 						contentFit="cover"
 						cachePolicy="memory-disk"
 						priority="normal"
-						recyclingKey={artworkSource.uri ?? 'missing-artwork'}
-						source={artworkSource}
+						key={`${track.platform}:${track.id}:${artwork.source.uri}`}
+						recyclingKey={`${track.platform}:${track.id}:${artwork.source.uri}`}
+						source={artwork.source}
+						onError={artwork.onError}
+						onLoad={artwork.onLoad}
 						style={{
 							...styles.trackArtworkImage,
 							opacity: isActiveTrack ? 0.6 : 1,

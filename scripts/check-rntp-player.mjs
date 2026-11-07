@@ -67,6 +67,7 @@ function runtime() {
 			return pending.promise
 		},
 		'@/hooks/useAppTheme': { useThemeColors: () => ({ text: 'white' }), useAppTheme: () => ({ blurTint: 'dark' }) },
+		'@/hooks/useTrackArtwork': { useTrackArtwork: (track) => ({ source: { uri: track?.artwork }, onError() {}, onLoad() {} }) },
 		'@/styles': { useDefaultStyles: () => ({ text: {} }), useUtilsStyles: () => ({ slider: {} }) },
 		'@/constants/tokens': { fontSize: { xs: 12 } },
 		'@expo/vector-icons': { FontAwesome6: 'Icon' },
@@ -954,6 +955,9 @@ await check('queue removal and reset retain business records and never persist n
 	h.facade.pause()
 	await h.facade.remove(a)
 	assert.equal(h.player.queue.length, 0)
+	assert.equal(h.stores.nowLyricState.getValue(), null)
+	assert.equal(h.stores.nowTranslationLyricState.getValue(), null)
+	assert.deepEqual(h.stores.lyricsStatusStore.getValue(), { status: 'idle', retryable: false })
 	assert.equal(h.facade.getCurrentMusic().id, b.id)
 	await h.facade.play()
 	await h.facade.remove(b)

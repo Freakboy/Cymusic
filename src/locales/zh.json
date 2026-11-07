@@ -36,7 +36,7 @@
 			"songsNumsToLoad": "首页播放歌曲数量"
 		},
 		"descriptions": {
-			"bluetoothLyrics": "系统标题仅显示当前歌词，不重复歌名；没有歌词或关闭时恢复歌名。会影响锁屏和 CarPlay，设备显示取决于车机。",
+			"bluetoothLyrics": "系统标题显示当前歌词，歌手行显示“歌名 - 歌手”，专辑保持原样。无当前歌词时标题显示歌名；关闭后恢复原字段。会影响锁屏和 CarPlay，排版取决于设备。",
 			"preciseSeeking": "改善部分 FLAC 快进后的音频与歌词不同步。开启后可能需要加载完整音频，播放前等待更久。切换歌曲后生效。"
 		},
 		"actions": {

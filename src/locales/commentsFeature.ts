@@ -15,6 +15,10 @@ i18n.store({
 			neteaseUnavailable:
 				'NetEase public comments could not be loaded. Access may be restricted or the service may be unavailable.',
 			noLyrics: 'No lyrics available',
+			lyricsLoading: 'Loading lyrics...',
+			lyricsInstrumental: 'Instrumental',
+			lyricsUnavailable: 'Lyrics not collected',
+			lyricsFailed: 'Could not load lyrics',
 		},
 	},
 	zh: {
@@ -30,6 +34,10 @@ i18n.store({
 				'仅供只读浏览。网易云匿名公开接口可能仅返回部分或历史评论，“最新”也可能不完整。',
 			neteaseUnavailable: '网易云公开评论获取失败，可能受访问权限、网络或接口可用性限制。',
 			noLyrics: '暂无歌词',
+			lyricsLoading: '歌词加载中...',
+			lyricsInstrumental: '纯音乐',
+			lyricsUnavailable: '暂无收录',
+			lyricsFailed: '歌词加载失败',
 		},
 	},
 })
