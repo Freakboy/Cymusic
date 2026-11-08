@@ -29,10 +29,11 @@ export function useTrackArtwork(
 	const [visibility, setVisibility] = useState({ key: visibilityKey, value: false })
 	const visible = !!track && (current || (visibility.key === visibilityKey && visibility.value))
 	const identity = `${visibilityKey}:${artwork ?? ''}`
-	const [state, setState] = useState({ identity, uri: usableArtwork(artwork), repaired: false })
-	const displayed = state.identity === identity ? state : { identity, uri: usableArtwork(artwork), repaired: false }
-	const attempt = useRef({ identity, failed: new Set<string>(), exhausted: false })
-	if (attempt.current.identity !== identity) attempt.current = { identity, failed: new Set(), exhausted: false }
+	const [state, setState] = useState({ identity, uri: usableArtwork(artwork) })
+	const displayed = state.identity === identity ? state : { identity, uri: usableArtwork(artwork) }
+	const attempt = useRef({ identity, failed: new Set<string>(), exhausted: false, retries: 0, confirmed: '' })
+	if (attempt.current.identity !== identity) attempt.current = { identity, failed: new Set(), exhausted: false, retries: 0, confirmed: '' }
+	const [retry, setRetry] = useState(0)
 	const imageToken = `${identity}:${displayed.uri ?? ''}`
 	const activeImage = useRef(imageToken)
 	activeImage.current = imageToken
@@ -55,17 +56,26 @@ export function useTrackArtwork(
 
 	useEffect(() => {
 		const session = attempt.current
-		if (!visible) { session.exhausted = false; return }
+		if (!visible) { session.exhausted = false; session.retries = 0; session.failed.clear(); return }
 		if (displayed.uri || !neteaseArtworkKey({ id, platform }) || session.exhausted) return
 		if (!current && !isVisibleTrack({ id, platform }, list)) return
 		let cancelled = false
+		let timer: ReturnType<typeof setTimeout> | undefined
 		void repairNeteaseArtwork({ id, platform, artwork }, [...session.failed]).then(result => {
 			if (cancelled || attempt.current !== session) return
 			session.exhausted = !result.artwork
-			setState({ identity, uri: result.artwork || undefined, repaired: !!result.artwork })
+			setState({ identity, uri: result.artwork || undefined })
+			if (!result.artwork && result.retryable && session.retries < 2) {
+				session.retries++
+				timer = setTimeout(() => {
+					session.exhausted = false
+					session.failed.clear()
+					setRetry(value => value + 1)
+				}, Math.max(1000, (result.retryAt ?? Date.now() + 1000) - Date.now()))
+			}
 		})
-		return () => { cancelled = true }
-	}, [visible, current, list, displayed.uri, identity, id, platform, artwork])
+		return () => { cancelled = true; if (timer !== undefined) clearTimeout(timer) }
+	}, [visible, current, list, displayed.uri, identity, id, platform, artwork, retry])
 
 	const uri = displayed.uri
 		? (options.fullSize ? getFullArtwork(displayed.uri)! : getThumbnailArtwork(displayed.uri)!)
@@ -75,11 +85,14 @@ export function useTrackArtwork(
 		onError: () => {
 			if (!displayed.uri || activeImage.current !== imageToken) return
 			attempt.current.failed.add(displayed.uri)
-			setState({ identity, uri: undefined, repaired: false })
+			setState({ identity, uri: undefined })
 		},
 		onLoad: () => {
 			if (!track || !displayed.uri || activeImage.current !== imageToken) return
-			if (displayed.repaired) updateTrackArtwork(track, displayed.uri)
+			if (attempt.current.confirmed !== displayed.uri) {
+				attempt.current.confirmed = displayed.uri
+				updateTrackArtwork(track, displayed.uri)
+			}
 			if (current) options.onConfirmed?.(track, displayed.uri)
 		},
 	}

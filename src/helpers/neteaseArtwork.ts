@@ -4,9 +4,9 @@ import { getPlayList, setPlayList } from '@/store/playList'
 import { neteaseArtworkKey, usableArtwork } from '@/utils/imageUtils'
 import { neteaseImage, normalizeNeteaseSong, requestJson } from './userApi/remotePlaylist'
 
-export type ArtworkTrack = { id?: string | number; platform?: string; artwork?: string }
+export type ArtworkTrack = { id?: string | number; platform?: string; artwork?: string; verifiedArtwork?: string }
 /** A candidate is not proof of an image download. Confirm with Image.onLoad. */
-export type ArtworkRepairResult = { artwork: string; candidates?: string[] }
+export type ArtworkRepairResult = { artwork: string; candidates?: string[]; retryable?: boolean; retryAt?: number }
 
 export function neteaseArtworkCandidates(artwork?: string): string[] {
 	const uri = usableArtwork(artwork)
@@ -28,18 +28,19 @@ export function neteaseArtworkCandidates(artwork?: string): string[] {
 	return [...new Set(urls.filter(Boolean))].slice(0, 8)
 }
 
-const inFlight = new Map<string, Promise<string[]>>()
+type DetailResult = { expires: number; urls: string[] }
+const inFlight = new Map<string, Promise<DetailResult>>()
 const cache = new Map<string, { expires: number; urls: string[] }>()
 const waiting: (() => void)[] = []
 let running = 0
 
-function detailArtwork(id: string): Promise<string[]> {
+function detailArtwork(id: string): Promise<DetailResult> {
 	const cached = cache.get(id)
-	if (cached && cached.expires > Date.now()) return Promise.resolve(cached.urls)
+	if (cached && cached.expires > Date.now()) return Promise.resolve(cached)
 	const pending = inFlight.get(id)
 	if (pending) return pending
-	if (waiting.length >= 32) return Promise.resolve([])
-	const task = new Promise<string[]>((resolve) => {
+	if (waiting.length >= 32) return Promise.resolve({ urls: [], expires: Date.now() + 1000 })
+	const task = new Promise<DetailResult>((resolve) => {
 		const run = async () => {
 			running++
 			let urls: string[] = []
@@ -57,11 +58,12 @@ function detailArtwork(id: string): Promise<string[]> {
 				}
 			} catch { /* Negative cache prevents repeated visible-row retries. */ }
 			cache.delete(id)
-			cache.set(id, { expires: Date.now() + (urls.length ? 300000 : 60000), urls })
+			const result = { expires: Date.now() + (urls.length ? 300000 : 60000), urls }
+			cache.set(id, result)
 			if (cache.size > 128) cache.delete(cache.keys().next().value!)
 			inFlight.delete(id)
 			running--
-			resolve(urls)
+			resolve(result)
 			waiting.shift()?.()
 		}
 		if (running < 2) void run()
@@ -78,7 +80,11 @@ export async function repairNeteaseArtwork(
 ): Promise<ArtworkRepairResult> {
 	if (!neteaseArtworkKey(track)) return { artwork: '' }
 	let candidates = neteaseArtworkCandidates(track.artwork).filter(url => !failed.includes(url))
-	if (!candidates.length) candidates = (await detailArtwork(String(track.id))).filter(url => !failed.includes(url))
+	if (!candidates.length) {
+		const detail = await detailArtwork(String(track.id))
+		candidates = detail.urls.filter(url => !failed.includes(url))
+		if (!candidates.length) return { artwork: '', candidates, retryable: true, retryAt: detail.expires }
+	}
 	return { artwork: candidates[0] || '', candidates }
 }
 
@@ -88,7 +94,7 @@ let persistTimer: ReturnType<typeof setTimeout> | undefined
 /** Enqueue only artwork confirmed by Image.onLoad (or a verified image response). */
 export function updateTrackArtwork(track: ArtworkTrack, artwork: string): void {
 	const key = neteaseArtworkKey(track)
-	if (!key || !usableArtwork(artwork)) return
+	if (!key || !usableArtwork(artwork) || (track.artwork === artwork && track.verifiedArtwork === artwork)) return
 	updates.set(key, artwork)
 	if (persistTimer === undefined) persistTimer = setTimeout(flushTrackArtworkUpdates, 250)
 }
@@ -103,7 +109,8 @@ export function flushTrackArtworkUpdates(): void {
 	const patch = <T extends ArtworkTrack>(track: T): T => {
 		const key = neteaseArtworkKey(track)
 		const artwork = key ? batch.get(key) : undefined
-		return artwork && artwork !== track.artwork ? { ...track, artwork } : track
+		return artwork && (artwork !== track.artwork || artwork !== track.verifiedArtwork)
+			? { ...track, artwork, verifiedArtwork: artwork } : track
 	}
 	const patchList = <T extends ArtworkTrack>(tracks: T[]): T[] => {
 		const next = tracks.map(patch)

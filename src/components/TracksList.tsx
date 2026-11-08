@@ -83,26 +83,23 @@ export const TracksList = React.memo(
 					selectedTrack as IMusic.IMusicItem,
 					currentMusic as IMusic.IMusicItem | null | undefined,
 				)
+				if (isCurrentTrack) {
+					if (myTrackPlayer.isCurrentTrackRetryable()) await myTrackPlayer.retryCurrentTrack()
+					router.navigate('/player')
+					return
+				}
 				const isChangingQueue = id !== activeQueueId
 				if (isChangingQueue) {
-					if (isCurrentTrack) {
-						router.navigate('/player')
-					} else {
-						await myTrackPlayer.playWithReplacePlayList(
-							selectedTrack as IMusic.IMusicItem,
-							(numsToPlay ? tracks.slice(0, numsToPlay) : tracks) as IMusic.IMusicItem[],
-						)
-						setActiveQueueId(id)
-					}
+					await myTrackPlayer.playWithReplacePlayList(
+						selectedTrack as IMusic.IMusicItem,
+						(numsToPlay ? tracks.slice(0, numsToPlay) : tracks) as IMusic.IMusicItem[],
+					)
+					setActiveQueueId(id)
 				} else {
-					if (isCurrentTrack) {
-						router.navigate('/player')
-					} else {
-						await myTrackPlayer.playWithReplacePlayList(
-							selectedTrack as IMusic.IMusicItem,
-							tracks as IMusic.IMusicItem[],
-						)
-					}
+					await myTrackPlayer.playWithReplacePlayList(
+						selectedTrack as IMusic.IMusicItem,
+						tracks as IMusic.IMusicItem[],
+					)
 				}
 			},
 			[id, activeQueueId, tracks, setActiveQueueId, currentMusic, numsToPlay],

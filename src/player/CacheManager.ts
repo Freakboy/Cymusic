@@ -11,6 +11,41 @@ import SHA256 from 'crypto-js/sha256'
 const cacheDir = FileSystem.documentDirectory + 'musicCache/'
 const cacheDirectoryPath = `${FileSystemNative.documentDirectoryPath}/musicCache`
 const discovered = new Map<string, string>()
+const rejectedFiles = new Set<string>()
+const rejectedDownloads = new Map<string, number>()
+
+function isRejectedFile(url: string) {
+	if (rejectedFiles.has(url)) return true
+	const expires = rejectedDownloads.get(url)
+	if (expires === undefined) return false
+	rejectedDownloads.delete(url)
+	if (expires <= Date.now()) return false
+	rejectedDownloads.set(url, expires)
+	return true
+}
+
+/** Quarantine only a confirmed native failure; nonempty() is not codec validation. */
+export function rejectCacheFile(url: string, item?: IMusic.IMusicItem) {
+	if (/^https?:\/\//i.test(url) && item) {
+		const identity = cacheIdentity(item)
+		downloads.get(keyFor(item, identity))?.controller.abort()
+		const path = getCacheFileUri(getLocalFilePath(item, identity))
+		rejectedDownloads.delete(path)
+		rejectedDownloads.set(path, Date.now() + 60000)
+		if (rejectedDownloads.size > 128) rejectedDownloads.delete(rejectedDownloads.keys().next().value!)
+	}
+	if (url.startsWith(fileUriFromPath(cacheDirectoryPath) + '/') || url.startsWith(cacheDir)) {
+		rejectedFiles.add(url)
+		invalidatePlaybackPreparation()
+	}
+}
+
+export async function isUsableCacheFile(url: string): Promise<boolean> {
+	if (!url.startsWith(fileUriFromPath(cacheDirectoryPath) + '/')) return true
+	if (isRejectedFile(url)) return false
+	const info = await FileSystem.getInfoAsync(url)
+	return info.exists && !info.isDirectory && info.size > 0
+}
 const downloads = new Map<
 	string,
 	{ promise: Promise<string>; controller: AbortController; users: Set<symbol> }
@@ -52,6 +87,7 @@ export const getCacheFileUri = (path: string): string =>
 	fileUriFromPath(`${cacheDirectoryPath}/${path.slice(cacheDir.length)}`)
 
 async function nonempty(path: string) {
+	if (isRejectedFile(path) || isRejectedFile(getCacheFileUri(path))) return false
 	const info = await FileSystem.getInfoAsync(getCacheFileUri(path))
 	return info.exists && !info.isDirectory && info.size > 0
 }
@@ -139,11 +175,14 @@ export const downloadToCache = async (
 					throw new Error('EMPTY_OR_FAILED_CACHE_DOWNLOAD')
 				if (controller.signal.aborted || generation !== cacheGeneration)
 					throw new Error('CACHE_CANCELLED')
-				// Same-directory rename: readers only see the validated complete file.
+				// Same-directory rename exposes a complete nonempty download, not partial bytes.
 				await FileSystem.moveAsync({
 					from: getCacheFileUri(temporary),
 					to: getCacheFileUri(destination),
 				})
+				rejectedFiles.delete(destination)
+				rejectedFiles.delete(getCacheFileUri(destination))
+				rejectedDownloads.delete(getCacheFileUri(destination))
 				if (controller.signal.aborted || generation !== cacheGeneration) {
 					await FileSystem.deleteAsync(getCacheFileUri(destination), { idempotent: true })
 					throw new Error('CACHE_CANCELLED')

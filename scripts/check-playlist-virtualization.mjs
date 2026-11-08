@@ -31,6 +31,7 @@ native.StyleSheet = { create: (value) => value }
 native.Alert = { alert() {} }
 const facade = {
 	useCurrentMusic: () => currentMusic,
+	isCurrentTrackRetryable: () => false,
 	isCached: async (track) => { calls.cache.push(track); return false },
 	playWithReplacePlayList: async (...args) => calls.replace.push(args),
 	deleteSongFromStoredPlayList: (...args) => calls.deletes.push(args),

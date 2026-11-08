@@ -339,6 +339,8 @@ export function createFixture() {
 			PlaybackState: { Idle: 'idle', Ready: 'ready', Buffering: 'buffering', Ended: 'ended', Error: 'error' },
 		}
 		const cache = {
+			rejectCacheFile() {},
+			isUsableCacheFile: async () => true,
 			cacheIdentity: () => ({ sourceId: 'direct', quality: stores.qualityStore.getValue() }),
 			findCachedPath: async (track) => {
 				calls.cache.push(track.id)

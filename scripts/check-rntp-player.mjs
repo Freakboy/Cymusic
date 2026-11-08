@@ -49,6 +49,7 @@ function runtime() {
 		react,
 		'react-native': nativeViews,
 		'@/player/MusicSourceResolver': {
+			invalidateSource() {},
 			resolveSource: (track, options) => {
 				sourceCalls.push({ track, options })
 				return resolveSource(track, options)
@@ -865,27 +866,28 @@ await check('error recovery requires actual current Error and is retired by sele
 	}
 })
 
-await check('native Play during error recovery reloads the retained item and cancels delayed Next', async () => {
+await check('native Play during error recovery resolves fresh and cancels delayed automatic retry', async () => {
 	const h = runtime()
 	await h.setup()
 	h.facade.addAll([song('a'), song('b')])
 	await h.facade.play(song('a', { headers: { Authorization: 'retry-header' } }))
 	h.player.state = 'error'
 	h.emit('PlaybackError', { message: 'retryable failure', code: 'network' })
-	assert.equal(h.count('stop'), 1)
-	assert.equal(h.count('clear'), 0)
+	assert.equal(h.count('stop'), 0)
+	assert.equal(h.count('clear'), 1)
 	assert.equal(h.player.getPlaybackState(), 'idle')
+	h.setResolver(async () => ({ url: 'https://media.example/fresh.mp3', headers: { Authorization: 'fresh-header' }, wasCached: false }))
 	h.player.play()
 	h.facade.observeNativeTransport('play')
 	h.delays[0].resolve()
 	await flush()
 	assert.equal(h.facade.getCurrentMusic().id, 'a')
-	assert.equal(h.sourceCalls.length, 1)
-	assert.equal(h.player.queue[0].url.headers.Authorization, 'retry-header')
+	assert.equal(h.sourceCalls.length, 2)
+	assert.equal(h.player.queue[0].url.headers.Authorization, 'fresh-header')
 	assert.equal(h.player.isPlaying(), true)
 })
 
-await check('an invalid source without a matching native item clears safely and Pause cancels its retry', async () => {
+await check('an invalid source clears safely without automatic skip or retry and Pause remains effective', async () => {
 	const h = runtime()
 	await h.setup()
 	h.setResolver(async () => ({ url: 'missing-bundled-asset.mp3', wasCached: false }))
@@ -893,15 +895,14 @@ await check('an invalid source without a matching native item clears safely and 
 	await flush()
 	assert.equal(h.count('items'), 0)
 	assert.equal(h.count('clear'), 1)
-	assert.equal(h.delays.length, 1)
+	assert.equal(h.delays.length, 0)
 	h.facade.pause()
-	h.delays[0].resolve()
 	await selecting
 	assert.equal(h.sourceCalls.length, 1)
 	assert.equal(h.stores.trackSourceLoadingStore.getValue(), null)
 })
 
-await check('a current unhandled playback error advances exactly once after the retained 500 ms delay', async () => {
+await check('a current playback error retries the same song once and ignores duplicate events', async () => {
 	const h = runtime()
 	await h.setup()
 	h.facade.addAll([song('a'), song('b')])
@@ -910,9 +911,16 @@ await check('a current unhandled playback error advances exactly once after the 
 	h.emit('PlaybackError', { message: 'broken stream', code: 'network' })
 	h.emit('PlaybackError', { message: 'duplicate', code: 'network' })
 	assert.equal(h.delays.length, 1)
+	h.setResolver(async () => ({ url: 'https://media.example/retry.mp3', wasCached: false }))
 	h.delays[0].resolve()
 	await flush()
-	assert.equal(h.facade.getCurrentMusic().id, 'b')
+	assert.equal(h.facade.getCurrentMusic().id, 'a')
+	assert.equal(h.sourceCalls.length, 2)
+	h.player.state = 'error'
+	h.emit('PlaybackError', { code: 'network' })
+	await flush()
+	assert.equal(h.player.queue.length, 0)
+	assert.equal(h.delays.length, 1)
 	assert.equal(h.sourceCalls.length, 2)
 })
 

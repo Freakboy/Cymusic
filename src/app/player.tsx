@@ -296,6 +296,7 @@ const PlayerScreenContent = () => {
 			},
 			{ id: 'album', title: i18n.t('player.showAlbum'), image: 'music.note.list' },
 			{ id: 'lyrics', title: i18n.t('player.showLyrics'), image: 'text.quote' },
+			{ id: 'reload-source', title: i18n.t('player.reloadSource'), image: 'arrow.clockwise' },
 			...(getCommentsPlatform(trackToDisplay?.platform) ? [{ id: 'comments', title: i18n.t('player.showComments'), image: 'bubble.left' }] : []),
 			{ id: 'playlist', title: i18n.t('player.addToPlaylist'), image: 'plus.circle' },
 			{ id: 'share', title: i18n.t('player.share'), image: 'square.and.arrow.up' },
@@ -582,9 +583,12 @@ const PlayerScreenContent = () => {
 											title={i18n.t('player.songOptions')}
 											onPressAction={({ nativeEvent }) => {
 												switch (nativeEvent.event) {
-													case 'favorite':
-														handleFavorite()
-														break
+												case 'favorite':
+													handleFavorite()
+													break
+												case 'reload-source':
+													void myTrackPlayer.retryCurrentTrack()
+													break
 													case 'album':
 														handleShowAlbum()
 														break

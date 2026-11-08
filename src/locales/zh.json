@@ -151,6 +151,7 @@
 		"download": "下载",
 		"addToPlaylist": "添加到歌单",
 		"showLyrics": "查看歌词",
+		"reloadSource": "重新解析并播放",
 		"showAlbum": "显示专辑",
 		"showComments": "查看评论",
 		"showTranslation": "显示翻译",

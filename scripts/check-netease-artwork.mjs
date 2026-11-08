@@ -149,6 +149,7 @@ await check('confirmed repairs batch latest playlists/local/queue/current by id+
 	f.clock.advance(250)
 	const list = f.stores.playListsStore.getValue()[0]
 	assert.equal(list.songs[0].artwork, url)
+	assert.equal(list.songs[0].verifiedArtwork, url)
 	assert.equal(list.songs[0].url, original.url)
 	assert.equal(list.songs[0].localAdded, true)
 	assert.equal(list.songs[1], qq)
@@ -198,7 +199,7 @@ function hookFixture(f, initial = track(), options = {}) {
 		react, '@shopify/flash-list': { useFlashListContext: () => context },
 		'@/constants/images': { unknownTrackImageUri: 'asset:default' },
 		'@/helpers/neteaseArtwork': f.helper, '@/utils/imageUtils': images,
-	}, f.clock)
+	}, { ...f.clock, Date: { now: () => f.clock.now } })
 	function render() {
 		for (let n = 0; n < 20; n++) {
 			dirty = false
@@ -378,6 +379,151 @@ await check('fake256 recycled UI cases allow absent track, preserve full resolut
 	const thumbnail = hookFixture(f, track('2010', 'https://y.gtimg.cn/music/photo_new/T002R800x800M000full.jpg'))
 	assert.ok(thumbnail.render().source.uri.includes('150x150'))
 	thumbnail.unmount()
+})
+
+await check('original Netease onLoad persists verification once, and restart reuses the confirmed URL', async () => {
+	const f = fixture()
+	const original = track('2010', 'https://example.com/original.jpg')
+	f.stores.importedLocalMusicStore.setValue([original])
+	const h = hookFixture(f, original)
+	const image = h.render()
+	image.onLoad()
+	image.onLoad()
+	f.clock.advance(250)
+	assert.equal(f.writes.length, 1)
+	const saved = plain(f.stores.importedLocalMusicStore.getValue()[0])
+	assert.equal(saved.verifiedArtwork, original.artwork)
+	image.onLoad()
+	assert.equal(f.clock.pending, 1, 'only visibility polling remains')
+	h.unmount()
+	const restarted = fixture()
+	restarted.stores.importedLocalMusicStore.setValue([saved])
+	const next = hookFixture(restarted, saved)
+	assert.equal(next.render().source.uri, original.artwork)
+	next.render().onLoad()
+	assert.equal(restarted.calls.length, 0)
+	assert.equal(restarted.writes.length, 0)
+	assert.equal(restarted.clock.pending, 1, 'verified URI does not enqueue persistence')
+	next.unmount()
+})
+
+await check('a visible target rejected by the full 2+32 queue retries after slots release', async () => {
+	const gate = deferred()
+	const f = fixture(async url => {
+		await gate.promise
+		const id = JSON.parse(new URL(url).searchParams.get('ids'))[0]
+		return { songs: [{ id, album: { picUrl: `https://example.com/${id}.jpg` } }] }
+	})
+	const pending = Array.from({ length: 34 }, (_, i) => f.helper.repairNeteaseArtwork(track(String(3000 + i))))
+	const h = hookFixture(f)
+	h.render()
+	await h.settle()
+	assert.equal(f.calls.length, 2)
+	gate.resolve()
+	await Promise.all(pending)
+	assert.equal(f.calls.length, 34)
+	f.clock.advance(1000)
+	h.render()
+	assert.equal((await h.settle()).source.uri, 'https://example.com/2010.jpg')
+	assert.equal(f.calls.length, 35)
+	h.unmount()
+	assert.equal(f.clock.pending, 0)
+})
+
+await check('visible offline/empty details recover after negative TTL without leaving the screen', async () => {
+	for (const failure of [() => { throw new Error('offline') }, () => ({ songs: [] })]) {
+		let recovered = false
+		const f = fixture(() => recovered ? { songs: [{ id: 2010, album: { picUrl: 'https://example.com/recovered.jpg' } }] } : failure())
+		const h = hookFixture(f)
+		h.render()
+		await h.settle()
+		assert.equal(f.calls.length, 1)
+		f.clock.advance(59999)
+		h.render()
+		assert.equal(f.calls.length, 1)
+		recovered = true
+		f.clock.advance(1)
+		h.render()
+		assert.equal((await h.settle()).source.uri, 'https://example.com/recovered.jpg')
+		assert.equal(f.calls.length, 2)
+		h.unmount()
+		assert.equal(f.clock.pending, 0)
+	}
+})
+
+await check('continuous visibility stops after three failure rounds; offscreen resets budget and cleans retry', async () => {
+	const f = fixture(async () => ({ songs: [] }))
+	const h = hookFixture(f)
+	h.render()
+	await h.settle()
+	for (let n = 0; n < 5; n++) {
+		f.clock.advance(60000)
+		h.render()
+		await h.settle()
+	}
+	assert.equal(f.calls.length, 3)
+	h.visible = false
+	f.clock.advance(500)
+	h.render()
+	assert.equal(f.clock.pending, 1)
+	h.visible = true
+	f.clock.advance(500)
+	h.render()
+	await h.settle()
+	assert.equal(f.calls.length, 4)
+	h.visible = false
+	f.clock.advance(500)
+	h.render()
+	assert.equal(f.clock.pending, 1, 'leaving visibility clears retry timer')
+	h.track = track('999')
+	h.render()
+	h.unmount()
+	assert.equal(f.clock.pending, 0)
+	f.clock.advance(120000)
+	await flush()
+	assert.equal(f.calls.length, 4)
+})
+
+await check('bad image candidates stay bounded across timed recovery rounds', async () => {
+	const f = fixture()
+	const h = hookFixture(f)
+	for (let round = 0; round < 4; round++) {
+		h.render()
+		await h.settle()
+		let failures = 0
+		while (h.render().source.uri !== 'asset:default') {
+			h.render().onError()
+			h.render()
+			await h.settle()
+			assert.ok(++failures <= 16, 'finite candidates per round')
+		}
+		f.clock.advance(300000)
+	}
+	h.render()
+	await h.settle()
+	assert.equal(f.calls.length, 3)
+	h.unmount()
+	assert.equal(f.clock.pending, 0)
+})
+
+await check('changing identity or unmounting cancels a pending visible retry', async () => {
+	for (const action of ['recycle', 'unmount']) {
+		const f = fixture(async () => ({ songs: [] }))
+		const h = hookFixture(f)
+		h.render()
+		await h.settle()
+		assert.equal(f.clock.pending, 2, 'visibility and retry timers')
+		if (action === 'recycle') {
+			h.track = track('999', 'https://example.com/999.jpg')
+			h.render()
+			assert.equal(f.clock.pending, 1, 'old identity retry removed')
+		}
+		h.unmount()
+		assert.equal(f.clock.pending, 0)
+		f.clock.advance(120000)
+		await flush()
+		assert.equal(f.calls.length, 1)
+	}
 })
 
 finish()

@@ -40,6 +40,7 @@ interface IPersistConfig {
 	'app.themeMode': 'system' | 'light' | 'dark'
 	'music.isCachedIconVisible': boolean
 	'music.songsNumsToLoad': number
+	'search.playbackMode': 'append' | 'newplaylist'
 }
 
 function set<K extends keyof IPersistConfig>(key: K, value: IPersistConfig[K] | undefined) {

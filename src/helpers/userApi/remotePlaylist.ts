@@ -337,6 +337,7 @@ export function mergeRemotePlaylist(existing: IMusic.PlayList, latest: RemotePla
 	// songs still present remotely stay unmarked so the new snapshot can track later deletions.
 	const preserveUnknown = previousKeys == null && getPlaylistReference(existing)?.platform === 'QQ'
 	const localKeys = new Set(existing.songs.filter((song) => song.localAdded).map(songKey))
+	const previousSongs = new Map(existing.songs.map(song => [songKey(song), song]))
 	const retained = existing.songs.filter((song) => merge || song.localAdded || preserveUnknown
 		|| (previousKeys && !previousKeys.includes(songKey(song))))
 	return {
@@ -345,7 +346,14 @@ export function mergeRemotePlaylist(existing: IMusic.PlayList, latest: RemotePla
 		title: existing.customName ? existing.title : latest.title,
 		artwork, coverImg: artwork,
 		customName: existing.customName, customCover: undefined,
-		songs: [...latest.songs.map((song) => localKeys.has(songKey(song)) ? { ...song, localAdded: true } : song),
+		songs: [...latest.songs.map((song) => {
+			const old = previousSongs.get(songKey(song))
+			// A valid-looking remote URL may still be broken; keep the exact onLoad-confirmed URI.
+			const verified = remoteArtwork(old?.verifiedArtwork) ? old?.verifiedArtwork : undefined
+			const artwork = verified || remoteArtwork(song.artwork, old?.artwork)
+			return { ...song, artwork, ...(verified ? { verifiedArtwork: verified } : {}),
+				...(localKeys.has(songKey(song)) ? { localAdded: true } : {}) }
+		}),
 			...retained.filter((song) => !remoteKeys.has(songKey(song))).map((song) => ({ ...song, localAdded: true }))],
 	}
 }

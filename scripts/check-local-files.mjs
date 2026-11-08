@@ -326,12 +326,9 @@ async function main() {
 		assert.equal(sourceRuntime.calls.cache.length, 0)
 		assert.equal(sourceRuntime.calls.writes.length, 0)
 		const missing = item('missing', `${oldDocuments}/importedLocalMusic/absent.mp3`)
-		assert.equal(
-			(await source.resolveSource(missing, { requestType: 'preload' })).url,
-			'fixture://fake-audio.mp3',
-		)
+		await assert.rejects(source.resolveSource(missing, { requestType: 'preload' }), /本地文件不存在/)
 		assert.equal(sourceRuntime.calls.toasts.length, 0)
-		assert.equal((await source.resolveSource(missing)).url, 'fixture://fake-audio.mp3')
+		await assert.rejects(source.resolveSource(missing), /本地文件不存在/)
 		assert.equal(sourceRuntime.calls.toasts.length, 1)
 		assert.equal(sourceRuntime.calls.cache.length, 0)
 	})

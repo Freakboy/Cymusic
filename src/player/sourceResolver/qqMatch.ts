@@ -66,6 +66,7 @@ export function selectQQMatch(item: IMusic.IMusicItem, candidates: Candidate[]):
 export async function resolveQQInfo(
 	item: IMusic.IMusicItem,
 	signal?: AbortSignal,
+	fresh = false,
 ): Promise<Candidate> {
 	if (signal?.aborted) throw new Error('SOURCE_CANCELLED')
 	const platform = (item.platform || '').trim().toLowerCase()
@@ -87,7 +88,7 @@ export async function resolveQQInfo(
 	}
 	const key = JSON.stringify([songKey(item), item.title, item.artist, item.album, item.duration])
 	const cached = matches.get(key)
-	if (cached && cached.expires > Date.now()) {
+	if (cached && cached.expires > Date.now() && !(fresh && !cached.value)) {
 		if (!cached.value) throw new Error('QQ_MATCH_NOT_FOUND')
 		return cached.value
 	}

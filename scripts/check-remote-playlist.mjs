@@ -739,4 +739,48 @@ await check('unmount during an in-flight refresh cannot schedule a late success 
 	assert.equal(f.clock.pending, 0)
 })
 
+await check('refresh retains confirmed song artwork over empty, invalid and stale valid latest URLs', async () => {
+	for (const incoming of ['', 'invalidhttp://broken', 'https://example.com/stale-but-valid.jpg']) {
+		const verified = 'https://example.com/confirmed.jpg'
+		const original = { id: 'remote:Netease:42', platform: 'Netease',
+			remoteBinding: { ...ref('Netease'), remoteSongKeys: ['Netease:1', 'Netease:2'] },
+			songs: [song('1', 'Netease', { artwork: verified, verifiedArtwork: verified, localAdded: true }),
+				song('2', 'Netease'), song('1', 'QQ', { artwork: 'https://qq.test/1.jpg', localAdded: true })] }
+		const f = fixture([{ code: 200, playlist: { trackCount: 2,
+			tracks: [netSong(3), { ...netSong(1), al: { name: 'latest album', picUrl: incoming } }],
+			coverImgUrl: 'https://example.com/latest-playlist.jpg' } }], [original])
+		const refreshed = await f.refreshRemotePlaylist(original.id)
+		assert.deepEqual(plain(refreshed.songs.map(f.songKey)), ['Netease:3', 'Netease:1', 'QQ:1'])
+		const kept = refreshed.songs[1]
+		assert.equal(kept.artwork, verified)
+		assert.equal(kept.verifiedArtwork, verified)
+		assert.equal(kept.localAdded, true)
+		assert.equal(kept.album, 'latest album')
+		assert.equal(kept.artist, 'new artist')
+		assert.equal(refreshed.songs[2].artwork, 'https://qq.test/1.jpg')
+		assert.equal(refreshed.coverImg, 'https://example.com/latest-playlist.jpg')
+		assert.equal(f.calls.length, 1, 'refresh adds no image prefetch')
+		assert.equal(f.writes[0][0].songs[1].verifiedArtwork, verified)
+	}
+})
+
+await check('song metadata merge preserves usable legacy covers only when latest artwork is invalid', () => {
+	const f = fixture()
+	const old = song('1', 'Netease', { artwork: 'https://example.com/old.jpg' })
+	const existing = { id: 'remote:Netease:42', songs: [old], remoteBinding: ref('Netease') }
+	for (const artwork of ['', 'invalidhttp://broken', 'https://example.com/new.jpg']) {
+		const latest = { ...existing, songs: [song('1', 'Netease', { artwork })] }
+		const result = f.mergeRemotePlaylist(existing, latest)
+		assert.equal(result.songs[0].artwork, artwork.startsWith('https:') ? artwork : old.artwork)
+		assert.equal(result.songs[0].verifiedArtwork, undefined)
+	}
+	const foreign = { ...existing, songs: [song('1', 'QQ', { artwork: 'https://qq.test/one.jpg', verifiedArtwork: 'https://qq.test/one.jpg' })] }
+	assert.equal(f.mergeRemotePlaylist(foreign, { ...existing, songs: [song('1', 'Netease')] }).songs[0].artwork, '')
+	const verified = 'http://example.com/exact-confirmed.jpg'
+	const confirmed = { ...existing, songs: [{ ...old, artwork: verified, verifiedArtwork: verified }] }
+	const merged = f.mergeRemotePlaylist(confirmed, { ...existing, songs: [song('1', 'Netease')] })
+	assert.equal(merged.songs[0].artwork, verified)
+	assert.equal(merged.songs[0].verifiedArtwork, verified)
+})
+
 finish()

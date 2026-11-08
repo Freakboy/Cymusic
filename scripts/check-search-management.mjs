@@ -6,6 +6,7 @@ import vm from 'node:vm'
 import ts from 'typescript'
 import CryptoJS from 'crypto-js'
 import { createSourceFixture, script as lxScript } from './source-runtime-fixture.mjs'
+import './check-search-play-mode.mjs'
 
 const deferred = () => {
 	let resolve, reject
@@ -43,6 +44,12 @@ function clock() {
 }
 function load(path, imports, timers = clock()) {
 	const exports = {}
+	if (imports.react && !imports.react.createElement) {
+		imports.react.createElement = (type, props, ...children) => ({
+			type,
+			props: { ...props, children },
+		})
+	}
 	const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
 	const code = ts.transpileModule(source, {
 		compilerOptions: {
@@ -422,6 +429,11 @@ function load(path, imports, timers = clock()) {
 		resolving = store(null)
 	const saved = new Map(),
 		added = []
+	const nowPersist = {
+		get: (key) => saved.get(key) ?? null,
+		set: (key, value) => saved.set(key, value),
+		useValue: (key, fallback) => saved.get(key) ?? fallback,
+	}
 	const adapter = fixture.adapter
 	const factory = load('src/helpers/userApi/importMusicSource.ts', {
 		'./lxMusicSourceAdapter': adapter,
@@ -464,7 +476,7 @@ function load(path, imports, timers = clock()) {
 				musicApiStore: sources,
 				trackSourceLoadingStore: resolving,
 			},
-			'@/store/PersistStatus': { set: (key, value) => saved.set(key, value) },
+			'@/store/PersistStatus': nowPersist,
 		},
 		timers,
 	)

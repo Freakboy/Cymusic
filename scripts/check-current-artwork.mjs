@@ -15,14 +15,16 @@ const song = (id = '2010', platform = 'Netease') => item(id, `https://audio.exam
 function runtime() {
 	const sources = []
 	let resolveSource = track => ({
-		url: track.url, headers: track.headers, userAgent: track.userAgent, wasCached: false,
-		cacheIdentity: { sourceId: track.cacheSourceId, quality: track.cacheQuality },
+		url: track.url || `https://audio.example/${track.id}.mp3`,
+		headers: track.headers ?? { Authorization: 'source-secret' }, userAgent: track.userAgent ?? 'source-agent', wasCached: false,
+		cacheIdentity: { sourceId: track.cacheSourceId ?? 'cache-source-hash', quality: track.cacheQuality ?? 'flac' },
 	})
 	const h = fixture.runtime({ moduleOverrides: {
 		'@/player/MusicSourceResolver': {
 			resolveSource: async track => { sources.push(track); return resolveSource(track) },
 			prepareNextTrack: async () => null, cancelPreparedNextTrack() {},
 			isPreparedNextTrackValid: () => false, setCurrentStreamPriority() {},
+			invalidateSource() {},
 			withSourceRuntimeLock: action => action(),
 		},
 	} })
@@ -210,7 +212,7 @@ await suite.check('confirmed native artwork updates metadata only, preserving pr
 	assert.equal(h.player.queue[0].artworkUrl, artwork)
 	assert.notEqual(h.player.queue[0].extras.cymusic.token, token)
 	assert.equal(h.facade.getCurrentMusic().headers.Authorization, 'source-secret')
-	assert.equal(h.sources.length, 1)
+	assert.equal(h.sources.length, 2, 'Native Error must resolve fresh audio while retaining the repaired artwork')
 })
 
 await suite.check('late A cannot update B or QQ with the same ID; A -> B -> A accepts the same-song image without old token reuse', async () => {

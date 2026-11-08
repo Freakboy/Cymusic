@@ -78,7 +78,7 @@ import {
 
 import {
 	resolveSource, prepareNextTrack, cancelPreparedNextTrack, isPreparedNextTrackValid,
-	setCurrentStreamPriority, withSourceRuntimeLock, type PreparedNextTrack,
+	setCurrentStreamPriority, withSourceRuntimeLock, invalidateSource, type PreparedNextTrack,
 } from '@/player/MusicSourceResolver'
 import { onPreparationInvalidated } from '@/player/preparationInvalidation'
 
@@ -133,6 +133,32 @@ let prepareRevision = 0
 let sourceRevision = 0
 let lyricsSequence = 0
 let retryLyrics: (() => Promise<void>) | null = null
+let playbackDeadline: ReturnType<typeof setTimeout> | null = null
+let automaticRetry = 0
+
+function clearPlaybackDeadline() {
+	if (playbackDeadline !== null) clearTimeout(playbackDeadline)
+	playbackDeadline = null
+}
+
+function watchPlaybackDeadline() {
+	if (playbackIntentStore.getValue() !== 'play' || !nativeQueue) return
+	const state = ReactNativeTrackPlayer.getPlaybackState()
+	if (state === PlaybackState.Ready || state === PlaybackState.Error) {
+		clearPlaybackDeadline()
+		return
+	}
+	if (playbackDeadline !== null) return
+	const owner = nativeQueue
+	const timer = setTimeout(() => {
+		if (playbackDeadline !== timer) return
+		playbackDeadline = null
+		if (nativeQueue !== owner || playbackIntentStore.getValue() !== 'play') return
+		// A stalled load is retryable, but does not prove that the URL is bad.
+		void failToPlay(false, false).catch((error) => logError('播放加载超时', error))
+	}, 45000)
+	playbackDeadline = timer
+}
 
 function retirePreparedSlot() {
 	if (prepareTimer !== null) clearTimeout(prepareTimer)
@@ -196,6 +222,7 @@ function schedulePreparedSlot() {
 
 function reconcileStreamPriority() {
 	if (!isCurrentNativeItem(ReactNativeTrackPlayer.getActiveMediaItem())) return
+	watchPlaybackDeadline()
 	const state = ReactNativeTrackPlayer.getPlaybackState()
 	if (state === PlaybackState.Buffering) {
 		setCurrentStreamPriority(true)
@@ -414,11 +441,16 @@ function handleNativeTransition(item: MediaItem | null | undefined, index: numbe
 function observeNativeTransport(intent: 'play' | 'pause' | 'stop') {
 	// Hybrid transport already ran natively. Only reconcile pending JS work here.
 	setPlaybackIntent(intent)
+	if (intent !== 'play') clearPlaybackDeadline()
 	if (intent === 'stop') {
 		retirePreparedSlot()
 		setCurrentStreamPriority(false)
 	}
 	if (intent === 'play') {
+		if (!nativeQueue && currentMusicStore.getValue() && trackSourceLoadingStore.getValue() === null) {
+			void play()
+			return
+		}
 		// Pause can arrive before a queued placeholder transition reaches JS. A
 		// later native resume must complete that deferred business-queue handoff.
 		handleNativeTransition(ReactNativeTrackPlayer.getActiveMediaItem(), ReactNativeTrackPlayer.getActiveMediaItemIndex())
@@ -427,6 +459,7 @@ function observeNativeTransport(intent: 'play' | 'pause' | 'stop') {
 }
 
 function reset() {
+	clearPlaybackDeadline()
 	lyricsSequence++
 	retryLyrics = null
 	nowLyricState.setValue(null)
@@ -551,11 +584,11 @@ async function setupTrackPlayer() {
 				handleNativeTransition(event.item, event.index)
 			}),
 			ReactNativeTrackPlayer.addEventListener(Event.PlaybackError, (error) => {
-				if (!error.message || trackSourceLoadingStore.getValue() !== null ||
+				if (trackSourceLoadingStore.getValue() !== null ||
 					ReactNativeTrackPlayer.getPlaybackState() !== PlaybackState.Error ||
 					!isCurrentNativeItem(ReactNativeTrackPlayer.getActiveMediaItem())) return
 				logInfo('播放出错', { message: error.message, code: error.code })
-				void failToPlay().catch((failure) => logError('播放错误恢复失败', failure))
+				void failToPlay(automaticRetry < 1).catch((failure) => logError('播放错误恢复失败', failure))
 			}),
 		)
 		logInfo('播放器初始化完成')
@@ -581,26 +614,31 @@ const getFakeNextTrack = (): Track => {
 }
 
 /** 播放失败时的情况 */
-async function failToPlay() {
+async function failToPlay(retry = false, confirmed = true) {
+	clearPlaybackDeadline()
 	retirePreparedSlot()
 	setCurrentStreamPriority(false)
 	const revision = controlRevision
 	const failedMusic = currentMusicStore.getValue()
 	const sourceToken = trackSourceLoadingStore.getValue()
 	retireTrackSkip()
-	if (isCurrentNativeItem(ReactNativeTrackPlayer.getActiveMediaItem())) {
-		// Keep the failed item/headers so a native Play during the delay can reload
-		// it immediately. That explicit intent also invalidates the delayed Next.
-		ReactNativeTrackPlayer.stop()
-	} else {
-		nativeQueue = null
-		ReactNativeTrackPlayer.clear()
-	}
+	if (!failedMusic) return
+	const owned = nativeQueue && isSameMediaItem(failedMusic, nativeQueue.track as IMusic.IMusicItem)
+		? nativeQueue.track : null
+	invalidateSource(failedMusic, confirmed ? owned?.url : undefined)
+	const clean = { ...failedMusic, url: undefined, headers: undefined, userAgent: undefined,
+		cacheSourceId: undefined, cacheQuality: undefined }
+	setCurrentMusic(clean)
+	PersistStatus.set('music.musicItem', undefined)
+	PersistStatus.set('music.progress', 0)
+	nativeQueue = null
+	ReactNativeTrackPlayer.clear()
+	if (!retry) return
 	await delay(500)
 	if (revision !== controlRevision || !isCurrentMusic(failedMusic) ||
 		sourceToken !== trackSourceLoadingStore.getValue() ||
 		playbackIntentStore.getValue() !== 'play') return
-	await skipToNext()
+	await play(clean, true, undefined, automaticRetry + 1)
 }
 
 // 播放模式相关
@@ -799,11 +837,13 @@ const clearToBePlayed = async () => {
 
 /** 暂停 */
 const pause = () => {
+	clearPlaybackDeadline()
 	setPlaybackIntent('pause')
 	ReactNativeTrackPlayer.pause()
 }
 
 const stop = () => {
+	clearPlaybackDeadline()
 	setPlaybackIntent('stop')
 	retirePreparedSlot()
 	setCurrentStreamPriority(false)
@@ -812,6 +852,8 @@ const stop = () => {
 
 /** 设置音源 */
 const setTrackSource = (track: Track) => {
+	if (!track.url || track.url === fakeAudioMp3Uri) throw new Error(PlayFailReason.INVALID_SOURCE)
+	clearPlaybackDeadline()
 	retirePreparedSlot()
 	currentIndex = getMusicIndex(track as IMusic.IMusicItem)
 	const token = createTrackSourceLoadingToken(track as IMusic.IMusicItem)
@@ -836,6 +878,7 @@ const setTrackSource = (track: Track) => {
 		// without letting setMediaItems change the requested stopped state.
 		ReactNativeTrackPlayer.stop()
 	}
+	watchPlaybackDeadline()
 	if (trackSourceLoadingStore.getValue() === null) reconcileStreamPriority()
 }
 /**
@@ -1197,7 +1240,7 @@ const deleteMusicApiById = (musicApiId: string) => {
 		{ text: '确定', onPress: () => logInfo('Add alert closed') },
 	])
 }
-const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, skipOperation?: symbol) => {
+const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, skipOperation?: symbol, retryAttempt = 0, fresh = false) => {
 	let trackSourceLoadingToken: string | null = null
 	try {
 		// A direct selection supersedes an older Next/Previous request. Its late
@@ -1213,6 +1256,15 @@ const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, s
 			throw new Error(PlayFailReason.PLAY_LIST_IS_EMPTY)
 		}
 		setPlaybackIntent('play')
+		automaticRetry = retryAttempt
+		if (isCurrentMusic(musicItem) && nativeQueue &&
+			isSameMediaItem(musicItem, nativeQueue.track as IMusic.IMusicItem) &&
+			ReactNativeTrackPlayer.getPlaybackState() === PlaybackState.Error) {
+			const revision = controlRevision
+			await failToPlay()
+			if (revision !== controlRevision) return
+			musicItem = currentMusicStore.getValue()!
+		}
 
 		// 1. If already playing this track
 		if (isCurrentMusic(musicItem)) {
@@ -1220,7 +1272,7 @@ const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, s
 			// reads the latest intent; explicit replacement still gets a new token.
 			if (trackSourceLoadingStore.getValue() !== null && !forcePlay) return
 			const firstItem = ReactNativeTrackPlayer.getQueue()[0]
-			if (nativeQueue && getNativeTrackIdentity(firstItem)?.token === nativeQueue.token &&
+			if (!fresh && nativeQueue && getNativeTrackIdentity(firstItem)?.token === nativeQueue.token &&
 				isSameMediaItem(musicItem, nativeQueue.track as IMusic.IMusicItem)) {
 				trackSourceLoadingStore.setValue(null)
 				if (forcePlay || ReactNativeTrackPlayer.getActiveMediaItemIndex() !== 0 ||
@@ -1243,6 +1295,7 @@ const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, s
 		}
 
 		trackSourceLoadingToken = createTrackSourceLoadingToken(musicItem)
+		clearPlaybackDeadline()
 		retirePreparedSlot()
 		setCurrentStreamPriority(true)
 		trackSourceLoadingStore.setValue(trackSourceLoadingToken)
@@ -1253,12 +1306,14 @@ const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, s
 		// 4. Resolve source (cache check + network if needed)
 		const source = await resolveSource(musicItem, {
 			requestType: 'current',
+			fresh,
 		})
 
 		// 5. Race condition guard
 		if (!isCurrentMusic(musicItem) || trackSourceLoadingStore.getValue() !== trackSourceLoadingToken) {
 			return
 		}
+		if (!source.url || source.url === fakeAudioMp3Uri) throw new Error(PlayFailReason.INVALID_SOURCE)
 
 		// 6. Build track and set source
 		const artworkKey = neteaseArtworkKey(musicItem)
@@ -1288,8 +1343,10 @@ const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, s
 			!source.url.startsWith('file://')
 		) {
 			setTimeout(() => {
+				if (nativeQueue?.token !== appliedToken) return
 				downloadToCache(track)
 					.then((localUri) => {
+						if (nativeQueue?.token !== appliedToken) return
 						logInfo('音乐已缓存到本地:', localUri)
 						const newTrack = { ...track, url: localUri }
 						addImportedLocalMusic([newTrack], false)
@@ -1312,6 +1369,7 @@ const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, s
 			// empty queue
 		} else {
 			logError('播放失败', e)
+			if (trackSourceLoadingToken) await failToPlay(false, false)
 		}
 	} finally {
 		if (
@@ -1319,10 +1377,25 @@ const play = async (musicItem?: IMusic.IMusicItem | null, forcePlay?: boolean, s
 			trackSourceLoadingStore.getValue() === trackSourceLoadingToken
 		) {
 			trackSourceLoadingStore.setValue(null)
+			if (isCurrentNativeItem(ReactNativeTrackPlayer.getActiveMediaItem()) &&
+				ReactNativeTrackPlayer.getPlaybackState() === PlaybackState.Error) {
+				void failToPlay(automaticRetry < 1).catch((error) => logError('播放错误恢复失败', error))
+			}
 			if (nativeQueue?.track.url?.startsWith('file://')) setCurrentStreamPriority(false)
 			reconcileStreamPriority()
 		}
 	}
+}
+
+/** UI retry action: restart resolution (including negative matches), preserving valid local files. */
+export function retryCurrentTrack(): Promise<void> {
+	return play(currentMusicStore.getValue(), true, undefined, 0, true)
+}
+
+/** Read at click time; zero/unknown duration and paused playback do not imply failure. */
+export function isCurrentTrackRetryable(): boolean {
+	return !!currentMusicStore.getValue() && trackSourceLoadingStore.getValue() === null &&
+		(!nativeQueue || ReactNativeTrackPlayer.getPlaybackState() === PlaybackState.Error)
 }
 const cacheAndImportMusic = async (track: IMusic.IMusicItem) => {
 	try {
@@ -1591,6 +1664,8 @@ const myTrackPlayer = {
 	skipToNext,
 	skipToPrevious,
 	play,
+	retryCurrentTrack,
+	isCurrentTrackRetryable,
 	playWithReplacePlayList,
 	pause,
 	stop,

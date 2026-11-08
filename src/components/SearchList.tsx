@@ -8,9 +8,12 @@ import { isSameMediaItem } from '@/utils/mediaItem'
 
 import { getSingerMidBySingerName } from '@/helpers/userApi/getMusicSource'
 import { useSourceSearchText } from '@/locales/sourceSearch'
+import PersistStatus from '@/store/PersistStatus'
+import { useQueue } from '@/store/queue'
+import { MenuView } from '@react-native-menu/menu'
 import { FlashList } from '@shopify/flash-list'
 import { router } from 'expo-router'
-import React, { memo, useCallback, useMemo } from 'react'
+import React, { memo, useCallback, useMemo, useRef } from 'react'
 import { ActivityIndicator, Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
 import { Image } from 'expo-image'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -29,6 +32,8 @@ export type SearchListProps = {
 	onRetry?: () => void
 	emptyMessage?: string
 }
+
+let searchQueueRevision = 0
 
 const ItemDivider = memo(() => {
 	const utilsStyles = useUtilsStyles()
@@ -89,6 +94,7 @@ const createStyles = (colors: ThemeColors) =>
 	})
 
 export const SearchList = ({
+	id,
 	tracks,
 	onLoadMore,
 	hasMore,
@@ -103,10 +109,21 @@ export const SearchList = ({
 	const styles = useMemo(() => createStyles(colors), [colors])
 	const currentMusic = myTrackPlayer.useCurrentMusic()
 	const playing = useIsPlaying()
+	const playbackMode = PersistStatus.useValue('search.playbackMode', 'append')
+	const { setActiveQueueId } = useQueue()
+	const latestResults = useRef({ id, tracks })
+	latestResults.current = { id, tracks }
 
 	const handleTrackSelect = useCallback(
 		async (selectedTrack: Track) => {
 			try {
+				if (latestResults.current.id !== id || latestResults.current.tracks !== tracks) return
+				if (
+					!tracks.some((track) =>
+						isSameMediaItem(track as IMusic.IMusicItem, selectedTrack as IMusic.IMusicItem),
+					)
+				)
+					return
 				if (selectedTrack.searchKind === 'albums' || selectedTrack.searchKind === 'playlists') {
 					router.navigate({
 						pathname: '/(tabs)/search/collection',
@@ -125,12 +142,23 @@ export const SearchList = ({
 					router.navigate(`/(modals)/${singerMid}`)
 					return
 				}
-				await myTrackPlayer.play(selectedTrack as IMusic.IMusicItem)
+				if (PersistStatus.get('search.playbackMode') === 'newplaylist') {
+					const songs = tracks.filter((track) => !track.isArtist && !track.searchKind)
+					const playback = myTrackPlayer.playWithReplacePlayList(
+						selectedTrack as IMusic.IMusicItem,
+						songs as IMusic.IMusicItem[],
+					)
+					// The facade replaces the queue before awaiting playback resolution.
+					setActiveQueueId(JSON.stringify(['search', id, ++searchQueueRevision]))
+					await playback
+				} else {
+					await myTrackPlayer.play(selectedTrack as IMusic.IMusicItem)
+				}
 			} catch (cause) {
 				Alert.alert(text.failed, cause instanceof Error ? cause.message : String(cause))
 			}
 		},
-		[text],
+		[id, tracks, setActiveQueueId, text],
 	)
 
 	const renderItem = useCallback(
@@ -205,6 +233,39 @@ export const SearchList = ({
 
 	return (
 		<View style={[defaultStyles.container]}>
+			<MenuView
+				onPressAction={({ nativeEvent }) => {
+					if (nativeEvent.event === 'append' || nativeEvent.event === 'newplaylist') {
+						PersistStatus.set('search.playbackMode', nativeEvent.event)
+					}
+				}}
+				actions={[
+					{
+						id: 'append',
+						title: text.playbackAppend,
+						state: playbackMode !== 'newplaylist' ? 'on' : 'off',
+					},
+					{
+						id: 'newplaylist',
+						title: text.playbackReplace,
+						state: playbackMode === 'newplaylist' ? 'on' : 'off',
+					},
+				]}
+				shouldOpenOnLongPress={false}
+			>
+				<View
+					accessibilityRole="button"
+					style={{
+						minHeight: 44,
+						justifyContent: 'center',
+						paddingHorizontal: screenPadding.horizontal,
+					}}
+				>
+					<Text style={{ color: colors.text }}>
+						{playbackMode === 'newplaylist' ? text.playbackReplace : text.playbackAppend}
+					</Text>
+				</View>
+			</MenuView>
 			<FlashList
 				data={tracks}
 				extraData={listExtraData}

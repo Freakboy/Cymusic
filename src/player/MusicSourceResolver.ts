@@ -2,7 +2,7 @@ import { fakeAudioMp3Uri } from '@/constants/images'
 import { resolveLocalFile } from '@/helpers/localFile'
 import { logError } from '@/helpers/logger'
 import { showToast } from '@/utils/utils'
-import { cacheIdentity, findCachedPath, getCacheFileUri, downloadToCache } from './CacheManager'
+import { cacheIdentity, findCachedPath, getCacheFileUri, downloadToCache, rejectCacheFile, isUsableCacheFile } from './CacheManager'
 import {
 	musicApiSelectedStore,
 	musicApiStore,
@@ -36,7 +36,38 @@ export type SourceResult = {
 	userAgent?: string
 	cacheIdentity?: CacheIdentity
 }
-type ResolveSourceOptions = { requestType?: ResolveSourceRequestType; signal?: AbortSignal }
+type ResolveSourceOptions = { requestType?: ResolveSourceRequestType; signal?: AbortSignal; fresh?: boolean }
+const failures = new Map<string, Map<string, number>>()
+const FAILURE_LIMIT = 128
+const REJECTED_URL_LIMIT = 16
+const REMOTE_REJECTION_TTL_MS = 60000
+
+function getFailures(item: IMusic.IMusicItem) {
+	const key = songKey(item)
+	const rejected = failures.get(key)
+	if (!rejected) return undefined
+	const now = Date.now()
+	for (const [url, expires] of rejected) if (expires <= now) rejected.delete(url)
+	// Keep the bounded failure marker so later selection still resolves instead of reusing item.url.
+	failures.delete(key)
+	failures.set(key, rejected)
+	return rejected
+}
+
+/** Only pass a URL for a confirmed playback failure, never for duration === 0. */
+export function invalidateSource(item: IMusic.IMusicItem, rejectedUrl?: string) {
+	const key = songKey(item)
+	const rejected = getFailures(item) ?? new Map<string, number>()
+	if (rejectedUrl) {
+		rejected.delete(rejectedUrl)
+		rejected.set(rejectedUrl, /^https?:\/\//i.test(rejectedUrl) ? Date.now() + REMOTE_REJECTION_TTL_MS : Infinity)
+		if (rejected.size > REJECTED_URL_LIMIT) rejected.delete(rejected.keys().next().value!)
+		rejectCacheFile(rejectedUrl, item)
+	}
+	failures.set(key, rejected)
+	if (failures.size > FAILURE_LIMIT) failures.delete(failures.keys().next().value!)
+	cancelPreparedNextTrack()
+}
 
 export type PreparedNextTrack = {
 	generation: number
@@ -190,6 +221,8 @@ async function resolveUncached(
 	item: IMusic.IMusicItem,
 	requestType: ResolveSourceRequestType,
 	signal: AbortSignal,
+	fresh: boolean,
+	explicitRetry: boolean,
 ): Promise<SourceResult> {
 	const selected = musicApiSelectedStore.getValue()
 	if (!selected) throw new Error('请先导入音源')
@@ -231,7 +264,7 @@ async function resolveUncached(
 				if (!candidates.length) continue
 				let musicInfo: Awaited<ReturnType<typeof resolvePlatformMusicInfo>>
 				try {
-					musicInfo = await resolvePlatformMusicInfo(item, platform, signal)
+					musicInfo = await resolvePlatformMusicInfo(item, platform, signal, fresh)
 				} catch (error) {
 					if (signal.aborted) throw error
 					continue
@@ -267,7 +300,9 @@ async function resolveUncached(
 							)
 							assertActive(signal)
 							const source = typeof result === 'string' ? { url: result } : result
-							if (source && /^https?:\/\/\S+$/i.test(source.url))
+							// Explicit retry may retry a stable provider URL; local quarantine stays intact.
+							if (source && /^https?:\/\/\S+$/i.test(source.url) &&
+								(explicitRetry || !getFailures(item)?.has(source.url)))
 								return {
 									url: source.url,
 									headers: source.headers,
@@ -306,6 +341,9 @@ export async function resolveSource(
 ): Promise<SourceResult> {
 	const requestType = options.requestType ?? 'current'
 	const isCurrent = requestType === 'current'
+	const previousFailures = getFailures(item)
+	const fresh = options.fresh === true || previousFailures !== undefined
+	const rejected = (url?: string) => !!url && getFailures(item)?.has(url) === true
 	if (isCurrent) {
 		currentRequests++
 		cancelPreparedNextTrack()
@@ -317,42 +355,49 @@ export async function resolveSource(
 	let timer: ReturnType<typeof setTimeout> | undefined
 	let timedOut = false
 	try {
-		assertActive(controller.signal)
-		if (isUnavailable(item)) {
-			if (isCurrent) showToast('歌曲不可用', '该歌曲暂不可播放', 'error')
-			return { url: fakeAudioMp3Uri, wasCached: false }
-		}
-		const local = await resolveLocalFile(item.url)
-		assertActive(controller.signal)
-		if (local.status === 'resolved')
-			return {
-				url: local.fileUri,
-				wasCached: false,
-				headers: item.headers,
-				userAgent: item.userAgent,
-			}
-		if (local.status !== 'nonlocal') throw new Error('本地文件不存在，请重新缓存或导入')
-		const identity = cacheIdentity(item)
-		const cached = await findCachedPath(item, identity)
-		assertActive(controller.signal)
-		if (cached)
-			return {
-				url: cached,
-				wasCached: true,
-				cacheIdentity: identity,
-				headers: item.headers,
-				userAgent: item.userAgent,
-			}
-		if (item.url && item.url !== 'Unknown' && !item.url.includes('fake'))
-			return {
-				url: item.url,
-				wasCached: false,
-				headers: item.headers,
-				userAgent: item.userAgent,
-				cacheIdentity: identity,
-			}
 		const result = await Promise.race([
-			resolveUncached(item, requestType, controller.signal),
+			(async () => {
+				assertActive(controller.signal)
+				if (isUnavailable(item)) {
+					if (isCurrent) showToast('歌曲不可用', '该歌曲暂不可播放', 'error')
+					throw new Error('歌曲不可用')
+				}
+				const local = await resolveLocalFile(rejected(item.url) || item.url === fakeAudioMp3Uri ? undefined : item.url)
+				assertActive(controller.signal)
+				if (local.status === 'resolved' && await isUsableCacheFile(local.fileUri)) {
+					assertActive(controller.signal)
+					return {
+						url: local.fileUri,
+						wasCached: false,
+						headers: item.headers,
+						userAgent: item.userAgent,
+					}
+				}
+				if (local.status === 'unresolved') throw new Error('本地文件不存在，请重新缓存或导入')
+				if (local.status === 'resolved') item = { ...item, url: undefined }
+				if (fresh) item = { ...item, url: undefined, headers: undefined, userAgent: undefined,
+					cacheSourceId: undefined, cacheQuality: undefined }
+				const identity = cacheIdentity(item)
+				const cached = await findCachedPath(item, identity)
+				assertActive(controller.signal)
+				if (cached && !rejected(getCacheFileUri(cached)))
+					return {
+						url: cached,
+						wasCached: true,
+						cacheIdentity: identity,
+						headers: item.headers,
+						userAgent: item.userAgent,
+					}
+				if (!fresh && item.url && item.url !== 'Unknown' && item.url !== fakeAudioMp3Uri && !item.url.includes('fake'))
+					return {
+						url: item.url,
+						wasCached: false,
+						headers: item.headers,
+						userAgent: item.userAgent,
+						cacheIdentity: identity,
+					}
+				return resolveUncached(item, requestType, controller.signal, fresh, options.fresh === true)
+			})(),
 			new Promise<never>((_, reject) => {
 				timer = setTimeout(
 					() => {
@@ -373,12 +418,13 @@ export async function resolveSource(
 		if (isCurrent) nowApiState.setValue('正常')
 		return result
 	} catch (error) {
-		if (isCurrent && (!controller.signal.aborted || timedOut)) {
+		if (!controller.signal.aborted || timedOut) invalidateSource(item)
+		if (isCurrent && !isUnavailable(item) && (!controller.signal.aborted || timedOut)) {
 			nowApiState.setValue('异常')
 			logError('获取音源失败', error)
 			showToast('获取音源失败', error instanceof Error ? error.message : String(error), 'error')
 		}
-		return { url: fakeAudioMp3Uri, wasCached: false }
+		throw error
 	} finally {
 		if (timer) clearTimeout(timer)
 		options.signal?.removeEventListener('abort', abort)

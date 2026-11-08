@@ -265,10 +265,11 @@ export async function resolvePlatformMusicInfo(
 	item: IMusic.IMusicItem,
 	platform: ResolutionPlatform,
 	signal?: AbortSignal,
+	fresh = false,
 ): Promise<PlatformMusicInfo> {
 	if (signal?.aborted) throw new Error('SOURCE_CANCELLED')
 	if (platform === 'tx') {
-		const info = await resolveQQInfo(item, signal)
+		const info = await resolveQQInfo(item, signal, fresh)
 		return {
 			source: 'tx',
 			id: info.mid,
@@ -292,7 +293,7 @@ export async function resolvePlatformMusicInfo(
 		item.duration,
 	])
 	const cached = matches.get(key)
-	if (cached && cached.expires > Date.now()) {
+	if (cached && cached.expires > Date.now() && !(fresh && !cached.info)) {
 		if (!cached.info) throw new Error(`${platform}_MATCH_NOT_FOUND`)
 		return cached.info
 	}

@@ -334,7 +334,7 @@ for (const [size, status] of [
 	assert.equal(result.url, 'https://audio.test/a')
 	assert.equal(calls[0][2], mid)
 	h.search([])
-	await h.resolver.resolveSource({ ...item, id: 'bad', title: 'Unmatched' })
+	await assert.rejects(h.resolver.resolveSource({ ...item, id: 'bad', title: 'Unmatched' }), /无法获取可播放音源/)
 	assert.equal(calls.length, 1)
 	console.log('PASS strict QQ matching, cached mapping, and no Netease-ID passthrough')
 }
@@ -443,7 +443,7 @@ for (const [size, status] of [
 		qq.resolveQQMid({ ...item, platform: 'wy', id: '98765432109876' }),
 		/QQ_MATCH_NOT_FOUND/,
 	)
-	await h.resolver.resolveSource({ ...item, platform: 'wy', id: '98765432109876' })
+	await assert.rejects(h.resolver.resolveSource({ ...item, platform: 'wy', id: '98765432109876' }), /无法获取可播放音源/)
 	assert.equal(calls.length, 1)
 	console.log('PASS placeholder handling, strict ambiguity rejection and explicit Netease matching')
 }
@@ -656,8 +656,7 @@ for (const marker of [{ id: 'unavailable:qq:123' }, { unavailable: true }]) {
 	h.stores.nowApiState.setValue('正常')
 	for (const url of ['file:///docs/existing.mp3', 'https://audio.test/a', undefined]) {
 		const track = { ...item, platform: 'tx', songmid: mid, ...marker, url }
-		const resolved = await h.resolver.resolveSource(track)
-		assert.equal(resolved.url, 'file:///fake.mp3')
+		await assert.rejects(h.resolver.resolveSource(track), /歌曲不可用/)
 		assert.equal(await h.resolver.prepareNextTrack(track, 'unavailable'), null)
 	}
 	assert.equal(h.localChecks, 0)
