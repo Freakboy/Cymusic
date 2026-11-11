@@ -10,6 +10,8 @@ import { useTrackArtwork } from '@/hooks/useTrackArtwork'
 import { ThemeColors, fontSize, screenPadding } from '@/constants/tokens'
 import LyricManager from '@/helpers/lyricManager'
 import myTrackPlayer from '@/helpers/trackPlayerIndex'
+import { songInformationRoute } from '@/helpers/songInformation'
+import { useSongInformationText } from '@/locales/songInformation'
 import { getSingerMidBySingerName } from '@/helpers/userApi/getMusicSource'
 import { getCommentsPlatform } from '@/helpers/userApi/neteaseComments'
 import { ThemeOverrideProvider, useThemeColors } from '@/hooks/useAppTheme'
@@ -286,8 +288,10 @@ const PlayerScreenContent = () => {
 		setTimingClose(Date.now() + minutes * 60 * 1000)
 	}, [])
 
+	const informationText = useSongInformationText()
 	const menuActions = React.useMemo(() => {
 		const actions = [
+			{ id: 'song-information', title: informationText.heading, image: 'info.circle' },
 			{
 				id: 'favorite',
 				title: i18n.t('player.like'),
@@ -321,7 +325,7 @@ const PlayerScreenContent = () => {
 			})
 		}
 		return actions
-	}, [colors.primary, isFavorite, trackToDisplay?.platform])
+	}, [colors.primary, isFavorite, trackToDisplay?.platform, informationText.heading])
 	useEffect(() => {
 		if (showLyrics) {
 			activateKeepAwakeAsync()
@@ -583,6 +587,9 @@ const PlayerScreenContent = () => {
 											title={i18n.t('player.songOptions')}
 											onPressAction={({ nativeEvent }) => {
 												switch (nativeEvent.event) {
+												case 'song-information':
+													if (trackToDisplay) router.push(songInformationRoute(trackToDisplay, myTrackPlayer.getCurrentMusic()))
+													break
 												case 'favorite':
 													handleFavorite()
 													break

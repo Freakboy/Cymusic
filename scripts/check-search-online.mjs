@@ -4,8 +4,17 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
 import axios from 'axios'
+import CryptoJS from 'crypto-js'
 
 const exports = {}
+const txExports = {}
+vm.runInNewContext(
+	ts.transpileModule(
+		readFileSync(new URL('../src/player/sourceResolver/txSearch.ts', import.meta.url), 'utf8'),
+		{ compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+	).outputText,
+	{ exports: txExports, require: () => CryptoJS },
+)
 let response
 const transport = {
 	post: async (...args) => {
@@ -25,6 +34,8 @@ vm.runInNewContext(
 	{
 		exports,
 		require: (name) => {
+			if (name === 'crypto-js') return CryptoJS
+			if (name === '@/player/sourceResolver/txSearch') return txExports
 			assert.equal(name, 'axios')
 			return transport
 		},

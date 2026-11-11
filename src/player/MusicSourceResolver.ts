@@ -394,7 +394,7 @@ export async function resolveSource(
 						wasCached: false,
 						headers: item.headers,
 						userAgent: item.userAgent,
-						cacheIdentity: identity,
+						cacheIdentity: item.cacheSourceId && item.cacheQuality ? { sourceId: item.cacheSourceId, quality: item.cacheQuality } : undefined,
 					}
 				return resolveUncached(item, requestType, controller.signal, fresh, options.fresh === true)
 			})(),

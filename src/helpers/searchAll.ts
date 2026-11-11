@@ -1,5 +1,7 @@
 import axios from 'axios'
 import type { Track } from '@/player/types'
+import { txSearchRequest } from '@/player/sourceResolver/txSearch'
+import CryptoJS from 'crypto-js'
 
 export type SearchType = 'songs' | 'artists' | 'albums' | 'playlists'
 export const SEARCH_PAGE_SIZE = 20
@@ -10,6 +12,77 @@ const categories = {
 	playlists: [3, 'songlist'],
 } as const
 
+// Reuse qqMatch's desktop envelope; re-sign after changing pagination/category.
+export function searchRequest(query: string, page: number, searchType: number) {
+	const request = txSearchRequest(query)
+	Object.assign(request.data.req_1.param, { page_num: page, search_type: searchType })
+	const hash = CryptoJS.SHA1(JSON.stringify(request.data)).toString()
+	const pick = (indexes: number[]) => indexes.map((index) => hash[index]).join('')
+	const scramble = [
+		89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64, 242, 133, 143, 161, 121, 179,
+	]
+	const bytes = scramble
+		.map((value, index) =>
+			(value ^ parseInt(hash.slice(index * 2, index * 2 + 2), 16)).toString(16).padStart(2, '0'),
+		)
+		.join('')
+	const base64 = CryptoJS.enc.Base64.stringify(CryptoJS.enc.Hex.parse(bytes)).replace(/[/+=]/g, '')
+	const sign =
+		`zzc${pick([23, 14, 6, 36, 16, 40, 7, 19])}${base64}${pick([16, 1, 32, 12, 19, 27, 8, 5])}`.toLowerCase()
+	return { ...request, url: `https://u.y.qq.com/cgi-bin/musics.fcg?sign=${sign}` }
+}
+
+function checkAbort(signal?: AbortSignal) {
+	if (signal?.aborted) throw new Error('SEARCH_CANCELLED')
+}
+
+class SearchResponseError extends Error {
+	constructor(
+		public apiCode: unknown,
+		public searchCode: unknown,
+	) {
+		super(`Invalid search response (api=${String(apiCode)}, search=${String(searchCode)})`)
+	}
+}
+
+async function requestSearch(
+	query: string,
+	page: number,
+	searchType: number,
+	signal?: AbortSignal,
+) {
+	const request = searchRequest(query, page, searchType)
+	for (let attempt = 0; attempt < 2; attempt++) {
+		checkAbort(signal)
+		try {
+			const response = await axios.post(
+				attempt === 0 ? request.url : 'https://u.y.qq.com/cgi-bin/musicu.fcg',
+				request.data,
+				{ signal, timeout: 8000, headers: { ...request.headers, referer: 'https://y.qq.com/' } },
+			)
+			checkAbort(signal)
+			if (
+				(response.data?.code != null && response.data.code !== 0) ||
+				response.data?.req_1?.code !== 0
+			)
+				throw new SearchResponseError(response.data?.code, response.data?.req_1?.code)
+			return response
+		} catch (cause) {
+			checkAbort(signal)
+			const error = cause as { code?: string; response?: { status: number } }
+			// Only transport failures/5xx or explicit gateway/signature rejection may fall back.
+			// Do not repeat unknown business failures, 4xx/rate limits, cancellation or malformed data.
+			const fallback =
+				cause instanceof SearchResponseError
+					? cause.apiCode === 2000 || cause.searchCode === 2000
+					: ['ERR_NETWORK', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT'].includes(error.code || '') ||
+						(error.response?.status >= 500 && error.response?.status <= 599)
+			if (attempt === 1 || !fallback) throw cause
+		}
+	}
+	throw new Error('SEARCH_FAILED')
+}
+
 export default async function searchAll(
 	query: string,
 	page = 1,
@@ -18,22 +91,7 @@ export default async function searchAll(
 ): Promise<{ data: Track[]; hasMore: boolean }> {
 	if (!query.trim()) return { data: [], hasMore: false }
 	const [searchType, key] = categories[type]
-	const response = await axios.post(
-		'https://u.y.qq.com/cgi-bin/musicu.fcg',
-		{
-			req_1: {
-				method: 'DoSearchForQQMusicDesktop',
-				module: 'music.search.SearchCgiService',
-				param: {
-					num_per_page: SEARCH_PAGE_SIZE,
-					page_num: page,
-					query: query.trim(),
-					search_type: searchType,
-				},
-			},
-		},
-		{ signal, timeout: 15000, headers: { referer: 'https://y.qq.com' } },
-	)
+	const response = await requestSearch(query.trim(), page, searchType, signal)
 	const result = response.data?.req_1
 	const list = result?.data?.body?.[key]?.list
 	if (

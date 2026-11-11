@@ -81,6 +81,8 @@ function load(path, imports, timers = clock()) {
 {
 	let response, request
 	const search = load('src/helpers/searchAll.ts', {
+		'crypto-js': CryptoJS,
+		'@/player/sourceResolver/txSearch': load('src/player/sourceResolver/txSearch.ts', { 'crypto-js': CryptoJS }),
 		axios: {
 			post: async (...args) => {
 				request = args
@@ -172,6 +174,9 @@ function load(path, imports, timers = clock()) {
 	}
 	react.useLayoutEffect = react.useEffect
 	const calls = []
+	const hotPlayback = [], hotNavigation = []
+	const hotSong = { id: 'chart-song', platform: 'tx', title: 'Chart song' }
+	const hotPlaylist = { id: 'catalogue-playlist', title: 'Catalogue playlist', searchKind: 'playlists' }
 	const jsx = (type, props) => ({ type, props })
 	let Screen = load(
 		'src/app/(tabs)/search/index.tsx',
@@ -179,6 +184,14 @@ function load(path, imports, timers = clock()) {
 			react,
 			'react/jsx-runtime': { jsx, jsxs: jsx },
 			'@/components/SearchList': { SearchList: 'SearchList' },
+			'@/components/TracksListItem': 'TracksListItem',
+			'@/helpers/trackPlayerIndex': { play: async (track) => hotPlayback.push(track) },
+			'@/store/PersistStatus': { get: () => 'append' },
+			'@/store/queue': { useQueue: () => ({ setActiveQueueId() {} }) },
+			'@/hooks/useSearchHot': { useSearchHot: (kind) => ({ tracks: kind === 'songs' ? [hotSong] : [hotPlaylist], loading: false, error: false, retry() {} }) },
+			'@/locales/searchDiscovery': { useSearchDiscoveryText: () => ({ songs: 'Hot songs', playlists: 'Hot playlists' }) },
+			'expo-router': { router: { navigate: (target) => hotNavigation.push(target) } },
+			'expo-image': { Image: 'Image' },
 			'@/constants/tokens': {},
 			'@/hooks/useAppTheme': { useThemeColors: () => ({}) },
 			'@/helpers/searchAll': {
@@ -192,6 +205,7 @@ function load(path, imports, timers = clock()) {
 			'@/locales/sourceSearch': { useSourceSearchText: () => labels },
 			'@/utils/i18n': { t: (key) => key },
 			'react-native': {
+				ScrollView: 'ScrollView', ActivityIndicator: 'ActivityIndicator', TouchableOpacity: 'TouchableOpacity', Alert: {},
 				TextInput: 'TextInput',
 				View: 'View',
 				Text: 'Text',
@@ -221,7 +235,7 @@ function load(path, imports, timers = clock()) {
 		if (!node || typeof node !== 'object') return []
 		return [node, ...[node.props?.children].flat(Infinity).flatMap((child) => nodes(child))]
 	}
-	const list = () => nodes(tree).find((node) => node.type === 'SearchList').props
+	const list = () => nodes(tree).find((node) => node.type === 'SearchList')?.props ?? { tracks: [] }
 	const input = (value) => {
 		const field = nodes(tree).find((node) => node.type === 'TextInput')
 		assert.ok(field, 'Search tab must render a visible TextInput without native header support')
@@ -229,10 +243,18 @@ function load(path, imports, timers = clock()) {
 		render()
 	}
 	render()
+	assert.ok(nodes(tree).some((node) => node.type === 'ScrollView'), 'Empty query displays discovery')
+	assert.ok(!nodes(tree).some((node) => node.type === 'SearchList'))
+	await nodes(tree).find((node) => node.type === 'TracksListItem').props.onTrackSelect(hotSong)
+	assert.equal(hotPlayback[0], hotSong)
+	nodes(tree).find((node) => node.type === 'TouchableOpacity').props.onPress()
+	assert.equal(hotNavigation[0].pathname, '/(tabs)/search/collection')
+	assert.equal(hotNavigation[0].params.id, 'catalogue-playlist')
 	const field = nodes(tree).find((node) => node.type === 'TextInput')
 	assert.ok(field, 'Search tab must render a visible TextInput without native header support')
 	assert.equal(field.props.style.minHeight, 44)
 	input('a')
+	assert.ok(!nodes(tree).some((node) => node.type === 'ScrollView'), 'Query hides both hot sections immediately')
 	timers.advance(349)
 	assert.equal(calls.length, 0)
 	input('ab')

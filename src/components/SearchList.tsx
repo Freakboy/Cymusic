@@ -109,7 +109,7 @@ export const SearchList = ({
 	const styles = useMemo(() => createStyles(colors), [colors])
 	const currentMusic = myTrackPlayer.useCurrentMusic()
 	const playing = useIsPlaying()
-	const playbackMode = PersistStatus.useValue('search.playbackMode', 'append')
+	const playbackMode = PersistStatus.useValue('search.playbackMode', 'newplaylist')
 	const { setActiveQueueId } = useQueue()
 	const latestResults = useRef({ id, tracks })
 	latestResults.current = { id, tracks }
@@ -142,7 +142,7 @@ export const SearchList = ({
 					router.navigate(`/(modals)/${singerMid}`)
 					return
 				}
-				if (PersistStatus.get('search.playbackMode') === 'newplaylist') {
+				if (PersistStatus.get('search.playbackMode') !== 'append') {
 					const songs = tracks.filter((track) => !track.isArtist && !track.searchKind)
 					const playback = myTrackPlayer.playWithReplacePlayList(
 						selectedTrack as IMusic.IMusicItem,

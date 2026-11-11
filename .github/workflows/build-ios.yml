@@ -5,17 +5,35 @@ on:
     branches: ['main']
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional existing tag at the selected commit: vX.Y.Z[-buildN][-(alpha|beta|rc).N]'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: macos-26
+    outputs:
+      release_tag: ${{ steps.ref.outputs.release_tag }}
+      sha: ${{ steps.ref.outputs.sha }}
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       EXPO_NO_TELEMETRY: '1'
       RCT_NEW_ARCH_ENABLED: '1'
       RCT_HERMES_V1_ENABLED: '1'
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name || inputs.release_tag || '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
       # Cache Yarn downloads only; node_modules, Pods and DerivedData stay fresh.
       - uses: actions/setup-node@v4
@@ -23,6 +41,10 @@ jobs:
           node-version: 24.19.0
           cache: yarn
           cache-dependency-path: yarn.lock
+
+      - name: Verify release ref and detailed changelog
+        id: ref
+        run: node scripts/prepare-release-notes.mjs --verify-ref
 
       - name: Verify build tools
         run: |
@@ -70,8 +92,8 @@ jobs:
           app_path="ios/build/Build/Products/Release-iphoneos/CyMusic.app"
           version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Info.plist")
           build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/Info.plist")
-          [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]]
-          [[ "$build" =~ ^[0-9]+(\.[0-9]+)*$ ]]
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$build" =~ ^[1-9][0-9]*$ ]]
           artifact_name="CyMusic-${version}-build${build}-unsigned"
           ipa_name="${artifact_name}.ipa"
           mkdir -p Payload
@@ -79,10 +101,51 @@ jobs:
           zip -r "$ipa_name" Payload/
           echo "ipa_name=$ipa_name" >> "$GITHUB_OUTPUT"
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare checksums and version-specific release notes
+        env:
+          BUILT_VERSION: ${{ steps.package.outputs.version }}
+          BUILT_BUILD: ${{ steps.package.outputs.build }}
+          IPA_NAME: ${{ steps.package.outputs.ipa_name }}
+          ARTIFACT_DIR: release-artifacts
+        run: node scripts/prepare-release-notes.mjs --prepare
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.artifact_name }}
-          path: ${{ steps.package.outputs.ipa_name }}
+          path: release-artifacts/
           if-no-files-found: error
+
+  publish:
+    needs: build
+    if: >-
+      needs.build.result == 'success' && needs.build.outputs.release_tag != '' &&
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: ios-release-${{ needs.build.outputs.release_tag }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: release-artifacts
+      - name: Verify identity and publish IPA without overwriting assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          ARTIFACT_DIR: release-artifacts
+        run: node scripts/prepare-release-notes.mjs --publish

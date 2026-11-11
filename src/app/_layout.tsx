@@ -132,6 +132,7 @@ const RootNavigation = () => {
 	return (
 		//每个 Stack.Screen 组件定义了一个可导航的屏幕
 		<Stack>
+			<Stack.Screen name="(modals)/songInformation" options={{ presentation: 'modal', headerShown: false }} />
 			<Stack.Screen name="(tabs)" options={{ headerShown: false }} />
 			<Stack.Screen name="(modals)/sourceManagement" options={{ presentation: 'modal', headerShown: false }} />
 			<Stack.Screen name="(modals)/comments" options={{ presentation: 'modal', headerShown: false }} />

@@ -16,10 +16,24 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import type { Track } from '@/player/types'
+import { useSearchHot } from '@/hooks/useSearchHot'
+import { useSearchDiscoveryText } from '@/locales/searchDiscovery'
+import TracksListItem from '@/components/TracksListItem'
+import myTrackPlayer from '@/helpers/trackPlayerIndex'
+import { router } from 'expo-router'
+import { Image } from 'expo-image'
+import { ActivityIndicator, Alert, ScrollView, TouchableOpacity } from 'react-native'
+import PersistStatus from '@/store/PersistStatus'
+import { useQueue } from '@/store/queue'
+
+let hotQueueRevision = 0
 
 const SearchlistsScreen = () => {
 	const text = useSourceSearchText()
 	const [search, setSearch] = useState('')
+	const discoveryText = useSearchDiscoveryText()
+	const hotSongs = useSearchHot('songs', !search.trim())
+	const hotPlaylists = useSearchHot('playlists', !search.trim())
 	// Batched A -> B -> A edits still need a fresh request generation.
 	const [revision, setRevision] = useState(0)
 	const input = useRef('')
@@ -37,6 +51,39 @@ const SearchlistsScreen = () => {
 	const searchRequestRef = useRef(0)
 	const [searchType, setSearchType] = useState<SearchType>('songs')
 	const slideAnim = useRef(new Animated.Value(0)).current
+	const { setActiveQueueId } = useQueue()
+	const latestHotSongs = useRef(hotSongs.tracks)
+	latestHotSongs.current = hotSongs.tracks
+	const hotInteractionGeneration = useRef(0)
+	const hotGeneration = hotInteractionGeneration.current
+	const selectHotSong = async (track: Track) => {
+		// Include synchronous input intent: cached rows can fire before the next render.
+		if (
+			search.trim() ||
+			input.current.trim() ||
+			hotGeneration !== hotInteractionGeneration.current ||
+			latestHotSongs.current !== hotSongs.tracks
+		)
+			return
+		const songs = hotSongs.tracks.filter((item) => !item.isArtist && !item.searchKind)
+		const selected = songs.find((item) => item.id === track.id && item.platform === track.platform)
+		if (!selected) return
+		try {
+			if (PersistStatus.get('search.playbackMode') === 'append') {
+				await myTrackPlayer.play(selected as IMusic.IMusicItem)
+			} else {
+				const snapshot = songs.map((item) => ({ ...item })) as IMusic.IMusicItem[]
+				const playback = myTrackPlayer.playWithReplacePlayList(
+					selected as IMusic.IMusicItem,
+					snapshot,
+				)
+				setActiveQueueId(JSON.stringify(['search-hot', 'qq-chart-26', ++hotQueueRevision]))
+				await playback
+			}
+		} catch (cause) {
+			Alert.alert(discoveryText.failed, cause instanceof Error ? cause.message : String(cause))
+		}
+	}
 	useEffect(() => {
 		Animated.spring(slideAnim, {
 			toValue: ['songs', 'artists', 'albums', 'playlists'].indexOf(searchType) * SEGMENT_WIDTH,
@@ -48,6 +95,7 @@ const SearchlistsScreen = () => {
 	const handleSearchChange = (value: string) => {
 		if (input.current === value) return
 		input.current = value
+		++hotInteractionGeneration.current
 		++searchRequestRef.current
 		pending.current = true
 		controller.current?.abort()
@@ -188,16 +236,79 @@ const SearchlistsScreen = () => {
 						))}
 					</View>
 				</View>
-				<SearchList
-					tracks={searchResults}
-					id={'search'}
-					onLoadMore={handleLoadMore}
-					hasMore={hasMore}
-					isLoading={isLoading}
-					error={error ? text.searchError : undefined}
-					onRetry={() => void fetchSearchResults(page.current + 1)}
-					emptyMessage={search.trim() ? text.empty : text.prompt}
-				/>
+				{search.trim() ? (
+					<SearchList
+						tracks={searchResults}
+						id={JSON.stringify(['search', search.trim(), searchType])}
+						onLoadMore={handleLoadMore}
+						hasMore={hasMore}
+						isLoading={isLoading}
+						error={error ? text.searchError : undefined}
+						onRetry={() => void fetchSearchResults(page.current + 1)}
+						emptyMessage={search.trim() ? text.empty : text.prompt}
+					/>
+				) : (
+					<ScrollView
+						keyboardShouldPersistTaps="handled"
+						contentContainerStyle={{ padding: 16, paddingBottom: 128 }}
+					>
+						{(
+							[
+								['songs', hotSongs],
+								['playlists', hotPlaylists],
+							] as const
+						).map(([kind, section]) => (
+							<View key={kind} style={{ marginBottom: 24 }}>
+								<Text style={{ color: colors.text, fontSize: 18, marginBottom: 12 }}>
+									{discoveryText[kind]}
+								</Text>
+								{section.loading && <ActivityIndicator />}
+								{section.error && (
+									<Pressable
+										accessibilityRole="button"
+										onPress={section.retry}
+										style={{ minHeight: 44, justifyContent: 'center' }}
+									>
+										<Text style={{ color: colors.text }}>
+											{discoveryText.error} {discoveryText.retry}
+										</Text>
+									</Pressable>
+								)}
+								{section.tracks.map((track) =>
+									kind === 'songs' ? (
+										<View key={track.id} style={{ marginBottom: 18 }}>
+											<TracksListItem track={track} onTrackSelect={selectHotSong} />
+										</View>
+									) : (
+										<TouchableOpacity
+											key={track.id}
+											style={{
+												flexDirection: 'row',
+												alignItems: 'center',
+												minHeight: 60,
+												marginBottom: 18,
+											}}
+											onPress={() =>
+												router.navigate({
+													pathname: '/(tabs)/search/collection',
+													params: { kind: 'playlists', id: track.id, title: track.title },
+												})
+											}
+										>
+											<Image
+												source={{ uri: track.artwork }}
+												style={{ width: 50, height: 50, borderRadius: 5, marginRight: 13 }}
+											/>
+											<Text style={{ color: colors.text, fontSize: 16, flex: 1 }}>
+												{track.title}
+											</Text>
+										</TouchableOpacity>
+									),
+								)}
+							</View>
+						))}
+					</ScrollView>
+				)}
 			</View>
 		</SafeAreaView>
 	)

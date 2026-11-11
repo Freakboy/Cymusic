@@ -449,6 +449,28 @@ await suite.check('SINGLE adopts only latest artwork from queue or current metad
 	}
 })
 
+await suite.check('addNext retires prepared audio and fences late preparation without touching current native token', async () => {
+	for (const pending of [false, true]) {
+		const h = runtime(); await h.start()
+		let gate, preparation
+		if (pending) {
+			gate = deferred()
+			h.setPrepare(async (...args) => { await gate.promise; return h.makePrepared(...args) })
+			preparation = h.tick(); await flush()
+		} else await h.tick()
+		const current = h.player.queue[0], commands = h.calls.player.length
+		h.facade.addNext(song('c'))
+		assert.equal(h.player.queue[0], current); assert.equal(h.calls.player.length, commands)
+		assert.equal(h.player.queue[1].extras.cymusic.id, 'c')
+		assert.equal(h.player.queue[1].extras.cymusic.placeholder, true)
+		assert.deepEqual(h.facade.getPlayList().map((track) => track.id), ['a', 'c', 'b'])
+		const mutations = h.mutations.length
+		if (pending) { gate.resolve(); await preparation }
+		assert.equal(h.mutations.length, mutations, 'Old preparation cannot install after queue reorder')
+		assert.equal(h.player.queue[0], current)
+	}
+})
+
 await fixture.dispose()
 suite.finish()
 console.log('Mocks validate JS ownership and native queue commands; audible iOS/Android handoff requires device checks.')

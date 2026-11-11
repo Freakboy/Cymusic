@@ -699,6 +699,25 @@ const add = (musicItem: IMusic.IMusicItem | IMusic.IMusicItem[], beforeIndex?: n
 	addAll(Array.isArray(musicItem) ? musicItem : [musicItem], beforeIndex)
 }
 
+/** Insert/move after current without changing transport or shuffling the insertion away. */
+const addNext = (musicItem: IMusic.IMusicItem) => {
+	const current = currentMusicStore.getValue()
+	if (isSameMediaItem(musicItem, current)) return
+	retirePreparedSlot()
+	const list = getPlayList()
+	const existing = list.find((item) => isSameMediaItem(item, musicItem))
+	const remaining = list.filter((item) => !isSameMediaItem(item, musicItem))
+	const index = current ? remaining.findIndex((item) => isSameMediaItem(item, current)) : -1
+	remaining.splice(index + 1, 0, {
+		...(existing ?? musicItem),
+		[timeStampSymbol]: Date.now(),
+		[sortIndexSymbol]: index + 1,
+	})
+	setPlayList(remaining)
+	currentIndex = getMusicIndex(current)
+	updateNextMetadata()
+}
+
 /**
  * 下一首播放
  * @param musicItem
@@ -1661,6 +1680,7 @@ const myTrackPlayer = {
 	addAll,
 	add,
 	addAsNextTrack,
+	addNext,
 	skipToNext,
 	skipToPrevious,
 	play,

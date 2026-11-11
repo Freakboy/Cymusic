@@ -2,12 +2,14 @@ import myTrackPlayer from '@/helpers/trackPlayerIndex'
 import { getSingerMidBySingerName } from '@/helpers/userApi/getMusicSource'
 import { getCommentsPlatform } from '@/helpers/userApi/neteaseComments'
 import { useFavorites } from '@/store/library'
-import { isInPlayList } from '@/store/playList'
 import { useQueue } from '@/store/queue'
 import i18n from '@/locales/commentsFeature'
+import { usePlayNextText } from '@/locales/playNext'
+import { useSongInformationText } from '@/locales/songInformation'
+import { songInformationRoute } from '@/helpers/songInformation'
 import { MenuAction, MenuView } from '@react-native-menu/menu'
-import { useFocusEffect, useRouter } from 'expo-router'
-import { PropsWithChildren, useCallback, useMemo, useState } from 'react'
+import { useRouter } from 'expo-router'
+import { PropsWithChildren, useMemo } from 'react'
 import type { Track } from '@/player/types'
 import { match, P } from 'ts-pattern'
 
@@ -26,23 +28,13 @@ export const TrackShortcutsMenu = ({
 	onDeleteTrack,
 }: TrackShortcutsMenuProps) => {
 	const router = useRouter()
+	const playNextText = usePlayNextText()
+	const informationText = useSongInformationText()
 	const { favorites, toggleTrackFavorite } = useFavorites()
 	const isFavorite = favorites.find((trackItem) => trackItem.id === track?.id)
 	const { activeQueueId } = useQueue()
 	const commentsPlatform = getCommentsPlatform(track.platform)
 	const supportsComments = !!commentsPlatform
-
-	const [isInPlaylist, setIsInPlaylist] = useState(false)
-
-	const updateIsInPlaylist = useCallback(() => {
-		setIsInPlaylist(isInPlayList(track as IMusic.IMusicItem))
-	}, [track])
-
-	useFocusEffect(
-		useCallback(() => {
-			updateIsInPlaylist()
-		}, [updateIsInPlaylist]),
-	)
 
 	const handleViewArtist = (artist: string) => {
 		getSingerMidBySingerName(artist).then((singerMid) => {
@@ -95,6 +87,7 @@ export const TrackShortcutsMenu = ({
 
 	const handlePressAction = async (id: string) => {
 		await match(id)
+			.with('song-information', () => router.push(songInformationRoute(track, myTrackPlayer.getCurrentMusic())))
 			.with('add-to-favorites', async () => {
 				toggleTrackFavorite(track)
 				if (activeQueueId?.startsWith('favorites')) {
@@ -109,13 +102,8 @@ export const TrackShortcutsMenu = ({
 					// await TrackPlayer.remove(trackToRemove)
 				}
 			})
-			.with('add-to-playlist', async () => {
-				await myTrackPlayer.add(track as IMusic.IMusicItem)
-				updateIsInPlaylist()
-			})
-			.with('remove-from-playlist', async () => {
-				await myTrackPlayer.remove(track as IMusic.IMusicItem)
-				updateIsInPlaylist()
+			.with('play-next', () => {
+				myTrackPlayer.addNext(track as IMusic.IMusicItem)
 			})
 			.with('view-single-artist', async () => {
 				handleViewArtist(artists[0])
@@ -157,12 +145,11 @@ export const TrackShortcutsMenu = ({
 			onPressAction={({ nativeEvent: { event } }) => handlePressAction(event)}
 			actions={[
 				{
-					id: isInPlaylist ? 'remove-from-playlist' : 'add-to-playlist',
-					title: isInPlaylist
-						? i18n.t('menu.removeFromPlayingList')
-						: i18n.t('menu.addToPlayingList'),
-					image: isInPlaylist ? 'minus' : 'plus',
+					id: 'play-next',
+					title: playNextText,
+					image: 'text.insert',
 				},
+				{ id: 'song-information', title: informationText.heading, image: 'info.circle' },
 				{
 					id: isFavorite ? 'remove-from-favorites' : 'add-to-favorites',
 					title: isFavorite ? i18n.t('menu.removeFromFavorites') : i18n.t('menu.addToFavorites'),

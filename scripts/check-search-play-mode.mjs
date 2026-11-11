@@ -146,11 +146,18 @@ const playlist = { id: 'playlist', searchKind: 'playlists' }
 const results = [a, artist, album, b, playlist]
 const search = screen('search:query:filter', results)
 search.render()
-// Default and explicit append both preserve the existing queue facade behavior.
+// Missing preference defaults to a new result playlist without writing over user choice.
+await search.select(b)
+assert.equal(calls.at(-1)[0], 'replace')
+assert.equal(calls.at(-1)[1], b)
+assert.deepEqual(Array.from(calls.at(-1)[2], (track) => track.id), ['a', 'b'])
+assert.equal(saved.has('search.playbackMode'), false)
+choose('append')
+search.render()
+const appendQueueId = activeQueueId
 await search.select(b)
 assert.equal(calls.at(-1)[0], 'play')
-assert.equal(calls.at(-1)[1], b)
-assert.equal(activeQueueId, 'original')
+assert.equal(activeQueueId, appendQueueId)
 assert.equal(alerts.length, 0)
 assert.equal(menu().props.children.props.style.minHeight, 44)
 assert.equal(labels.playbackAppend, '加入当前队列播放')
@@ -162,7 +169,7 @@ assert.deepEqual(
 )
 choose('newplaylist')
 assert.equal(saved.get('search.playbackMode'), 'newplaylist')
-assert.equal(calls.length, 1, 'Changing mode must not start playback')
+assert.equal(calls.length, 2, 'Changing mode must not start playback')
 choose('unknown')
 assert.equal(
 	saved.get('search.playbackMode'),

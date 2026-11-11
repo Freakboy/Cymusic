@@ -15,8 +15,9 @@ import i18n, { changeLanguage, nowLanguage } from '@/utils/i18n'
 import { showToast } from '@/utils/utils'
 import { MenuView } from '@react-native-menu/menu'
 import Constants from 'expo-constants'
+import { isNewerRelease } from '@/helpers/releaseVersion'
 import { useRouter } from 'expo-router'
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
 import {
 	ActivityIndicator,
 	Alert,
@@ -34,6 +35,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Toast, { BaseToast, ErrorToast } from 'react-native-toast-message'
 import appIcon from '@/assets/144.png'
+import { applyConfigBackup, CONFIG_BACKUP_EXPORT_UNSUPPORTED, configBackupPreview, pickConfigBackup, shareConfigBackup } from '@/helpers/configBackup'
+import { configBackupText } from '@/locales/configBackup'
 const QUALITY_OPTIONS = ['128k', '320k', 'flac']
 const CURRENT_VERSION = Constants.expoConfig?.version ?? '未知版本'
 
@@ -84,6 +87,9 @@ const SettingModal = () => {
 	const router = useRouter()
 	const [currentQuality, setCurrentQuality] = useCurrentQuality()
 	const [isLoading, setIsLoading] = useState(false)
+	const [backupBusy, setBackupBusy] = useState(false)
+	const backupActive = useRef(false)
+	const backupText = configBackupText()
 	const apiState = nowApiState.useValue()
 	const selectedSource = musicApiSelectedStore.useValue()
 	const language = nowLanguage.useValue()
@@ -171,6 +177,13 @@ const SettingModal = () => {
 							? i18n.t('settings.items.normal')
 							: i18n.t('settings.items.exception'),
 				},
+			],
+		},
+		{
+			title: backupText.section,
+			data: [
+				{ id: 'exportConfig', title: backupText.export, type: 'link' },
+				{ id: 'importConfig', title: backupText.import, type: 'link' },
 			],
 		},
 		{
@@ -345,7 +358,7 @@ const SettingModal = () => {
 		)
 		try {
 			const result = await Promise.race([
-				fetch('https://api.github.com/repos/gyc-12/Cymusic/releases/latest'),
+				fetch('https://api.github.com/repos/Freakboy/Cymusic/releases/latest'),
 				timeoutPromise,
 			])
 			if (!(result instanceof Response)) {
@@ -359,7 +372,7 @@ const SettingModal = () => {
 			const latestVersion = data.tag_name
 			logInfo(CURRENT_VERSION + 'CURRENT_VERSIONCURRENT_VERSION' + latestVersion)
 
-			if (latestVersion !== CURRENT_VERSION) {
+			if (isNewerRelease(latestVersion, CURRENT_VERSION, Constants.expoConfig?.ios?.buildNumber)) {
 				Alert.alert(
 					i18n.t('settings.actions.checkUpdate.available'),
 					`${i18n.t('settings.actions.checkUpdate.message')} ${latestVersion}`,
@@ -389,6 +402,44 @@ const SettingModal = () => {
 			)
 		} finally {
 			setIsLoading(false)
+		}
+	}
+
+	const backupError = (error: unknown) => {
+		Alert.alert(backupText.error, error instanceof Error && error.message === backupText.busy
+			? backupText.busy : error instanceof Error && error.message === CONFIG_BACKUP_EXPORT_UNSUPPORTED
+				? backupText.exportUnsupported : backupText.errorMessage)
+	}
+	const handleConfigBackup = async (action: 'import' | 'export') => {
+		if (backupActive.current) return
+		backupActive.current = true
+		setBackupBusy(true)
+		const finish = () => { backupActive.current = false; setBackupBusy(false) }
+		if (action === 'export') {
+			Alert.alert(backupText.exportTitle, backupText.exportWarning, [
+				{ text: backupText.cancel, style: 'cancel', onPress: finish },
+				{ text: backupText.share, onPress: () => {
+					void shareConfigBackup().catch(backupError).finally(finish)
+				} },
+			], { cancelable: false })
+			return
+		}
+		try {
+			const backup = await pickConfigBackup()
+			if (!backup) { finish(); return }
+			const counts = configBackupPreview(backup)
+			const summary = backupText.preview.replace(/%\{(\w+)\}/g, (_match, key: keyof typeof counts) => String(counts[key]))
+			Alert.alert(backupText.previewTitle, `${summary}\n\n${backupText.importWarning}`, [
+				{ text: backupText.cancel, style: 'cancel', onPress: finish },
+				{ text: backupText.confirm, style: 'destructive', onPress: () => {
+					void applyConfigBackup(backup, backupText.busy).then(() => {
+						Alert.alert(backupText.done, backupText.doneMessage)
+					}).catch(backupError).finally(finish)
+				} },
+			], { cancelable: false })
+		} catch (error) {
+			backupError(error)
+			finish()
 		}
 	}
 
@@ -424,8 +475,13 @@ const SettingModal = () => {
 					key={item.id}
 					accessibilityRole="button"
 					accessibilityLabel={item.title}
+					disabled={backupBusy && (item.id === 'exportConfig' || item.id === 'importConfig')}
 					style={itemStyle}
 					onPress={() => {
+						if (item.id === 'exportConfig' || item.id === 'importConfig') {
+							void handleConfigBackup(item.id === 'exportConfig' ? 'export' : 'import')
+							return
+						}
 						if (item.id === 'sourceManagement') {
 							router.push('/(modals)/sourceManagement')
 							return
