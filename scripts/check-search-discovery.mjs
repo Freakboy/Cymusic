@@ -169,6 +169,11 @@ const playlists = await hot.fetchSearchHot('playlists')
 assert.ok(hotRequest[0].includes('sortId=5'))
 assert.equal(playlists[0].searchKind, 'playlists')
 assert.equal(playlists[0].artwork, 'https://image')
+await hot.fetchSearchHot('playlists', undefined, 1)
+assert.ok(hotRequest[0].includes('sin=10&ein=19'))
+hotResponse = { code: 0, data: { list: [] } }
+assert.equal((await hot.fetchSearchHot('playlists', undefined, 2)).length, 0)
+await assert.rejects(hot.fetchSearchHot('playlists', undefined, -1), /Invalid hot page/)
 for (const response of [
 	{ code: 1 },
 	{ code: 0, subcode: 1 },
@@ -217,8 +222,8 @@ const react = {
 const hook = load('src/hooks/useSearchHot.ts', {
 	react,
 	'@/helpers/searchHot': {
-		fetchSearchHot: (kind, signal) =>
-			new Promise((resolve, reject) => requests.push({ kind, signal, resolve, reject })),
+		fetchSearchHot: (kind, signal, page) =>
+			new Promise((resolve, reject) => requests.push({ kind, signal, page, resolve, reject })),
 	},
 }).useSearchHot
 let sections
@@ -263,10 +268,51 @@ assert.equal(
 	4,
 	'Successful sections survive query visibility without unnecessary reload',
 )
+sections[1].refresh()
+render()
+assert.equal(requests.at(-1).page, 0)
+const firstPage = Array.from({ length: 10 }, (_, i) => ({ id: `list-${i}`, title: `List ${i}` }))
+requests.at(-1).resolve(firstPage)
+await flush()
+render()
+assert.equal(sections[1].tracks.length, 10)
+sections[1].loadMore()
+sections[1].loadMore()
+render()
+assert.equal(requests.at(-1).page, 1)
+requests.at(-1).reject(new Error('offline'))
+await flush()
+render()
+assert.equal(sections[1].tracks.length, 10, 'Failed append keeps existing lists')
+sections[1].retry()
+render()
+assert.equal(requests.at(-1).page, 1, 'Retry uses the failed page')
+requests.at(-1).resolve([{ id: 'list-9', title: 'Duplicate' }, { id: 'list-10', title: 'New' }])
+await flush()
+render()
+assert.equal(sections[1].tracks.length, 11)
+assert.equal(sections[1].hasMore, false)
+const requestCount = requests.length
+sections[1].loadMore()
+render()
+assert.equal(requests.length, requestCount)
+sections[1].refresh()
+render()
+const staleRefresh = requests.at(-1)
+sections[1].refresh()
+render()
+assert.equal(staleRefresh.signal.aborted, true)
+staleRefresh.resolve([{ id: 'stale-refresh' }])
+requests.at(-1).resolve(firstPage)
+await flush()
+render()
+assert.equal(sections[1].tracks.length, 10, 'Refresh replaces rather than appends')
+assert.equal(sections[1].tracks[0].id, 'list-0')
+console.log('PASS: playlist refresh, append deduplication, failed-page retry, double-click guard, end and stale refresh')
 sections[0].retry()
 render()
 for (const slot of slots) slot.cleanup?.()
-assert.equal(requests[4].signal.aborted, true)
+assert.equal(requests.at(-1).signal.aborted, true)
 console.log(
 	'PASS: signed search categories/pages, classified bounded fallback, cancellation; real hot endpoint parsing and independent hook retry/stale states',
 )

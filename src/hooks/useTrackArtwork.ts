@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useFlashListContext } from '@shopify/flash-list'
 import { unknownTrackImageUri } from '@/constants/images'
-import { ArtworkTrack, repairNeteaseArtwork, updateTrackArtwork } from '@/helpers/neteaseArtwork'
+import { ArtworkTrack, repairNeteaseArtwork, updateTrackArtwork, subscribeArtworkRefresh } from '@/helpers/neteaseArtwork'
 import { getFullArtwork, getThumbnailArtwork, neteaseArtworkKey, usableArtwork } from '@/utils/imageUtils'
+
+let manualRefreshSequence = Date.now()
 
 function isVisibleTrack(track: ArtworkTrack, list: ReturnType<typeof useFlashListContext<ArtworkTrack>>) {
 	const ref = list?.getRef()
@@ -34,10 +36,17 @@ export function useTrackArtwork(
 	const attempt = useRef({ identity, failed: new Set<string>(), exhausted: false, retries: 0, confirmed: '' })
 	if (attempt.current.identity !== identity) attempt.current = { identity, failed: new Set(), exhausted: false, retries: 0, confirmed: '' }
 	const [retry, setRetry] = useState(0)
-	const imageToken = `${identity}:${displayed.uri ?? ''}`
+	const [manualRevision, setManualRevision] = useState(0)
+	const imageToken = `${identity}:${displayed.uri ?? ''}:${manualRevision}`
 	const activeImage = useRef(imageToken)
 	const deadline = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 	activeImage.current = imageToken
+	useEffect(() => subscribeArtworkRefresh({ id, platform }, uri => {
+		activeImage.current = ''
+		attempt.current = { identity, failed: new Set(), exhausted: false, retries: 0, confirmed: '' }
+		setState({ identity, uri })
+		setManualRevision(++manualRefreshSequence)
+	}), [id, platform, identity])
 	useEffect(() => {
 		activeImage.current = imageToken
 		return () => { activeImage.current = '' }
@@ -114,7 +123,8 @@ export function useTrackArtwork(
 		? (options.fullSize ? getFullArtwork(displayed.uri)! : getThumbnailArtwork(displayed.uri)!)
 		: unknownTrackImageUri
 	return {
-		source: { uri },
+		source: { uri: manualRevision && /^https?:/.test(uri)
+			? `${uri}${uri.includes('?') ? '&' : '?'}cymusicArtworkRetry=${manualRevision}` : uri },
 		onError: failImage,
 		onLoad: () => {
 			if (!track || !displayed.uri || activeImage.current !== imageToken) return

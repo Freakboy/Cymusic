@@ -36,6 +36,7 @@ function fixture(globals = { URL, TextEncoder, Error }) {
 	let busy = false
 	let failKey
 	let failStorage = false
+	let failSetup = false
 	let picker = { canceled: true }
 	let pickedJson = JSON.stringify(backup())
 	let info = { exists: true, isDirectory: false, size: pickedJson.length }
@@ -52,6 +53,7 @@ function fixture(globals = { URL, TextEncoder, Error }) {
 			writes.push([key, value]); if (value === undefined) persisted.delete(key); else persisted.set(key, value)
 		} },
 		'@/store/config': { get: key => key ? pathGet(key) : localMemory, setup: async () => {
+			if (failSetup) throw new Error('SECRET storage read failure')
 			localMemory = plain(localDisk); calls.push(['Config.setup'])
 		} },
 		'@/helpers/storage': { setStorage: async (key, value) => {
@@ -88,9 +90,20 @@ function fixture(globals = { URL, TextEncoder, Error }) {
 		set platform(value) { platform = value }, set shareMode(value) { shareMode = value },
 		get shareCallbacks() { return shareCallbacks }, set writeFailure(value) { writeFailure = value },
 		set localMemory(value) { localMemory = value },
+		set failSetup(value) { failSetup = value },
 		set cleanupFailure(value) { cleanupFailure = value }, set cacheDirectory(value) { cacheDirectory = value },
 	}
 }
+
+await check('cold-start export initializes local Config before collecting without writes or script execution', async () => {
+	const f = fixture()
+	f.localMemory = null
+	assert.equal(await f.helper.shareConfigBackup(), true)
+	assert.equal(f.calls[0][0], 'Config.setup')
+	assert.equal(f.writes.length, 0)
+	const payload = f.helper.parseConfigBackup(f.calls.find(call => call[0] === 'write')[2])
+	assert.equal(payload.localSettings['setting.basic.maxDownload'], 4)
+})
 
 await check('real Config.setup empty/default payload and persisted lyric size index export successfully', async () => {
 	const { default: config } = loadModule('src/store/config.ts', {
@@ -151,7 +164,7 @@ await check('export diagnostics identify safe stages and cleanup does not mask t
 	for (const stage of ['cache', 'collect', 'validate', 'write', 'share', 'cleanup']) {
 		const f = fixture()
 		if (stage === 'cache') f.cacheDirectory = null
-		if (stage === 'collect') f.localMemory = null
+		if (stage === 'collect') { f.localMemory = null; f.failSetup = true }
 		if (stage === 'validate') f.stores.musicApiStore.setValue(Array.from({ length: 30 }, (_, i) => source({ id: `s${i}`, script: 'x'.repeat(400000) })))
 		if (stage === 'write') { f.writeFailure = true; f.cleanupFailure = true }
 		if (stage === 'share') { f.shareMode = 'error'; f.cleanupFailure = true }
@@ -317,7 +330,8 @@ await check('invalid input and source busy cannot apply; write failure rolls bac
 	assert.equal(f.stores.playListsStore.getValue(), old)
 	f.localMemory = null
 	assert.throws(() => f.helper.serializeConfigBackup(), /CONFIG_BACKUP_EXPORT_COLLECT/)
-	await assert.rejects(f.helper.applyConfigBackup(backup(), 'busy'), /initialized/)
+	await f.helper.applyConfigBackup(backup(), 'busy')
+	assert.equal(f.localMemory.setting.basic.maxDownload, 3)
 })
 
 await check('document picker cancel is passive; copied JSON is size-checked before read and preview does not apply', async () => {

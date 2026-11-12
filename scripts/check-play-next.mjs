@@ -92,8 +92,18 @@ await suite.check('actual TrackShortcutsMenu always offers play-next and dispatc
 		'@/locales/playNext': { usePlayNextText: () => '下一首播放' },
 		'@/locales/songInformation': { useSongInformationText: () => ({ heading: '歌曲信息' }) },
 		'@/helpers/songInformation': { songInformationRoute: () => ({}) },
+		'@/helpers/neteaseArtwork': { refreshTrackArtwork: async track => { refreshed.push(track.id); return true } },
+		'@/utils/imageUtils': { neteaseArtworkKey: track => track.platform === 'Netease' ? track.id : null },
+		'@/locales/artworkRefresh': { useArtworkRefreshText: () => ({ action: '重新获取封面' }) },
+		'react-native': { Alert: { alert() { throw new Error('Unexpected alert') } } },
 		'@react-native-menu/menu': { MenuView: 'MenuView' }, 'expo-router': { useRouter: () => ({}), useFocusEffect: (fn) => fn() },
 	}, { React: react })
+	const refreshed = []
+	const artworkMenu = TrackShortcutsMenu({ track: { ...b, platform: 'Netease' } })
+	assert(artworkMenu.props.actions.some(action => action.id === 'refresh-artwork'))
+	await artworkMenu.props.onPressAction({ nativeEvent: { event: 'refresh-artwork' } })
+	assert.deepEqual(refreshed, ['b'])
+	assert.equal(h.facade.getCurrentMusic().id, 'a')
 	for (const track of [a, b, song('new')]) {
 		const tree = TrackShortcutsMenu({ track })
 		assert.equal(tree.props.actions[0].id, 'play-next'); assert.equal(tree.props.actions[0].title, '下一首播放')

@@ -7,6 +7,10 @@ import i18n from '@/locales/commentsFeature'
 import { usePlayNextText } from '@/locales/playNext'
 import { useSongInformationText } from '@/locales/songInformation'
 import { songInformationRoute } from '@/helpers/songInformation'
+import { refreshTrackArtwork } from '@/helpers/neteaseArtwork'
+import { neteaseArtworkKey } from '@/utils/imageUtils'
+import { useArtworkRefreshText } from '@/locales/artworkRefresh'
+import { Alert } from 'react-native'
 import { MenuAction, MenuView } from '@react-native-menu/menu'
 import { useRouter } from 'expo-router'
 import { PropsWithChildren, useMemo } from 'react'
@@ -30,6 +34,7 @@ export const TrackShortcutsMenu = ({
 	const router = useRouter()
 	const playNextText = usePlayNextText()
 	const informationText = useSongInformationText()
+	const artworkText = useArtworkRefreshText()
 	const { favorites, toggleTrackFavorite } = useFavorites()
 	const isFavorite = favorites.find((trackItem) => trackItem.id === track?.id)
 	const { activeQueueId } = useQueue()
@@ -87,6 +92,11 @@ export const TrackShortcutsMenu = ({
 
 	const handlePressAction = async (id: string) => {
 		await match(id)
+			.with('refresh-artwork', async () => {
+				try {
+					if (!await refreshTrackArtwork(track)) Alert.alert(artworkText.action, artworkText.failed)
+				} catch { Alert.alert(artworkText.action, artworkText.failed) }
+			})
 			.with('song-information', () => router.push(songInformationRoute(track, myTrackPlayer.getCurrentMusic())))
 			.with('add-to-favorites', async () => {
 				toggleTrackFavorite(track)
@@ -150,6 +160,7 @@ export const TrackShortcutsMenu = ({
 					image: 'text.insert',
 				},
 				{ id: 'song-information', title: informationText.heading, image: 'info.circle' },
+				...(neteaseArtworkKey(track) ? [{ id: 'refresh-artwork', title: artworkText.action, image: 'arrow.clockwise' }] : []),
 				{
 					id: isFavorite ? 'remove-from-favorites' : 'add-to-favorites',
 					title: isFavorite ? i18n.t('menu.removeFromFavorites') : i18n.t('menu.addToFavorites'),

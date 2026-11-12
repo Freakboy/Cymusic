@@ -296,6 +296,7 @@ export function configBackupPreview(backup: ConfigBackup) {
 export async function applyConfigBackup(input: ConfigBackup, busyMessage: string): Promise<void> {
 	const backup = parseConfigBackup(JSON.stringify(portable(input)))
 	assertSourceIdle(busyMessage)
+	if (Config.get() === null) await Config.setup()
 	await withSourceRuntimeLock(async () => {
 		assertSourceIdle(busyMessage)
 		const oldConfig = Config.get()
@@ -356,6 +357,8 @@ export async function pickConfigBackup(): Promise<ConfigBackup | null> {
 }
 export async function shareConfigBackup(): Promise<boolean> {
 	if (Platform.OS !== 'ios') throw new Error(CONFIG_BACKUP_EXPORT_UNSUPPORTED)
+	try { if (Config.get() === null) await Config.setup() }
+	catch { throw exportFailure('collect') }
 	if (!FileSystem.cacheDirectory) throw exportFailure('cache')
 	const uri = `${FileSystem.cacheDirectory}cymusic-config-${Date.now()}.json`
 	const json = serializeConfigBackup()

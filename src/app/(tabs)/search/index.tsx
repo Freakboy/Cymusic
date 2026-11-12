@@ -273,6 +273,10 @@ const SearchlistsScreen = () => {
 								<Text style={{ color: colors.text, fontSize: 18, marginBottom: 12 }}>
 									{discoveryText[kind]}
 								</Text>
+								{kind === 'playlists' && <Pressable accessibilityRole="button" disabled={section.loading}
+									onPress={section.refresh} style={{ minHeight: 44, justifyContent: 'center' }}>
+									<Text style={{ color: colors.primary }}>{discoveryText.refresh}</Text>
+								</Pressable>}
 								{section.loading && <ActivityIndicator />}
 								{section.error && (
 									<Pressable
@@ -311,6 +315,12 @@ const SearchlistsScreen = () => {
 										</TouchableOpacity>
 									),
 								)}
+								{kind === 'playlists' && !section.loading && !section.error && section.hasMore &&
+									<Pressable accessibilityRole="button" onPress={section.loadMore} style={{ minHeight: 44, justifyContent: 'center' }}>
+										<Text style={{ color: colors.primary }}>{discoveryText.more}</Text>
+									</Pressable>}
+								{kind === 'playlists' && !section.loading && !section.error && section.hasMore === false &&
+									<Text style={{ color: colors.textMuted }}>{discoveryText.end}</Text>}
 							</View>
 						))}
 						{(searchType === 'artists' || searchType === 'albums') &&

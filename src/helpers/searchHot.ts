@@ -8,9 +8,11 @@ export const HOT_PLAYLISTS_URL =
 	'https://c.y.qq.com/splcloud/fcgi-bin/fcg_get_diss_by_tag.fcg?categoryId=10000000&sortId=5&sin=0&ein=9&format=json&inCharset=utf8&outCharset=utf-8'
 
 // QQ hot-song chart and playlist catalogue sorted by popularity, never keyword search.
-export async function fetchSearchHot(kind: HotKind, signal?: AbortSignal): Promise<Track[]> {
+export async function fetchSearchHot(kind: HotKind, signal?: AbortSignal, page = 0): Promise<Track[]> {
+	if (!Number.isSafeInteger(page) || page < 0 || page > 99) throw new Error('Invalid hot page')
 	if (signal?.aborted) throw new Error('HOT_CANCELLED')
-	const response = await axios.get(kind === 'songs' ? HOT_SONGS_URL : HOT_PLAYLISTS_URL, {
+	const playlistUrl = HOT_PLAYLISTS_URL.replace('sin=0&ein=9', `sin=${page * 10}&ein=${page * 10 + 9}`)
+	const response = await axios.get(kind === 'songs' ? HOT_SONGS_URL : playlistUrl, {
 		signal,
 		timeout: 10000,
 		headers: { referer: 'https://y.qq.com/' },
@@ -45,7 +47,7 @@ export async function fetchSearchHot(kind: HotKind, signal?: AbortSignal): Promi
 				: undefined,
 		}
 	})
-	if (!tracks.length || tracks.some((track) => !track.id || !track.title))
+	if ((!tracks.length && (kind === 'songs' || page === 0)) || tracks.some((track) => !track.id || !track.title))
 		throw new Error(`Incomplete hot ${kind} response`)
 	const seen = new Set<string>()
 	return tracks.filter((track) => {

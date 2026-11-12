@@ -35,6 +35,27 @@ const cache = new Map<string, { expires: number; urls: string[] }>()
 const waiting: (() => void)[] = []
 let running = 0
 
+const refreshListeners = new Map<string, Set<(uri: string) => void>>()
+export function subscribeArtworkRefresh(track: ArtworkTrack, listener: (uri: string) => void) {
+	const key = neteaseArtworkKey(track)
+	if (!key) return () => {}
+	const listeners = refreshListeners.get(key) ?? new Set<(uri: string) => void>()
+	refreshListeners.set(key, listeners)
+	listeners.add(listener)
+	return () => { listeners.delete(listener); if (!listeners.size) refreshListeners.delete(key) }
+}
+/** User initiated exact-ID lookup; candidate is saved only by the image load callback. */
+export async function refreshTrackArtwork(track: ArtworkTrack): Promise<boolean> {
+	const key = neteaseArtworkKey(track)
+	if (!key) return false
+	cache.delete(String(track.id))
+	const result = await repairNeteaseArtwork(track, [], { detailOnly: true,
+		isActive: () => !!refreshListeners.get(key)?.size })
+	if (!result.artwork) return false
+	for (const listener of refreshListeners.get(key) ?? []) listener(result.artwork)
+	return !!refreshListeners.get(key)?.size
+}
+
 function detailArtwork(id: string, isActive: () => boolean = () => true): Promise<DetailResult> {
 	const cached = cache.get(id)
 	if (cached && cached.expires > Date.now()) return Promise.resolve(cached)
