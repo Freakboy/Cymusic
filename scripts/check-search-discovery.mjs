@@ -286,6 +286,8 @@ let savedMode = null,
 	blockedPlayback
 const screenPlayback = [],
 	screenAlerts = []
+const hotEnable = new Map(), screenNavigation = []
+const playlistInventory = [{ id: 'popular-list', title: 'Popular list', searchKind: 'playlists' }]
 const Screen = load('src/app/(tabs)/search/index.tsx', {
 	react,
 	'react/jsx-runtime': { jsx, jsxs: jsx },
@@ -294,7 +296,7 @@ const Screen = load('src/app/(tabs)/search/index.tsx', {
 	'@/constants/tokens': {},
 	'@/hooks/useAppTheme': { useThemeColors: () => ({}) },
 	'@/helpers/searchAll': { default: async () => ({ data: [], hasMore: false }), __esModule: true },
-	'@/locales/sourceSearch': { useSourceSearchText: () => ({}) },
+	'@/locales/sourceSearch': { useSourceSearchText: () => ({ playlists: 'Playlists', albums: 'Albums', prompt: 'Enter a query' }) },
 	'@/locales/searchDiscovery': {
 		useSearchDiscoveryText: () => ({
 			songs: 'Hot songs',
@@ -304,12 +306,12 @@ const Screen = load('src/app/(tabs)/search/index.tsx', {
 	},
 	'@/utils/i18n': { t: (key) => key },
 	'@/hooks/useSearchHot': {
-		useSearchHot: (kind) => ({
-			tracks: kind === 'songs' ? inventory : [],
+		useSearchHot: (kind, enabled) => { hotEnable.set(kind, enabled); return ({
+			tracks: kind === 'songs' ? inventory : playlistInventory,
 			loading: false,
 			error: false,
 			retry() {},
-		}),
+		}) },
 	},
 	'@/helpers/trackPlayerIndex': {
 		async play(track) {
@@ -335,7 +337,7 @@ const Screen = load('src/app/(tabs)/search/index.tsx', {
 			},
 		}),
 	},
-	'expo-router': { router: {} },
+	'expo-router': { router: { navigate: (route) => screenNavigation.push(route) } },
 	'expo-image': { Image: 'Image' },
 	'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
 	'react-native': {
@@ -365,6 +367,10 @@ const renderScreen = () => {
 const rowHandler = () =>
 	nodes(screenTree).find((node) => node.type === 'TracksListItem').props.onTrackSelect
 renderScreen()
+assert.equal(hotEnable.get('songs'), true)
+assert.equal(hotEnable.get('playlists'), false)
+assert.ok(!nodes(screenTree).some((node) => node.type === 'Text' && node.props.children === 'Hot playlists'),
+	'Songs category must not contain the hot playlist section')
 assert.ok(
 	!nodes(screenTree).some((node) => node.type === 'MenuView'),
 	'Do not add an empty-query mode UI',
@@ -470,6 +476,38 @@ assert.equal(
 console.log(
 	'PASS: actual hot song handler default snapshot/explicit append, independent queue IDs, hidden/stale guards and errors',
 )
+
+const selectCategory = (label) => nodes(screenTree).find((node) => node.type === 'Pressable' &&
+	nodes(node).some((child) => child.type === 'Text' && child.props.children === label)).props.onPress()
+const oldSongHandler = rowHandler(), beforeCategoryPlay = screenPlayback.length
+selectCategory('Playlists')
+await oldSongHandler(inventory[0])
+assert.equal(screenPlayback.length, beforeCategoryPlay, 'Category intent blocks old song clicks before re-render')
+renderScreen()
+assert.equal(hotEnable.get('songs'), false)
+assert.equal(hotEnable.get('playlists'), true)
+assert.ok(!nodes(screenTree).some((node) => node.type === 'TracksListItem'))
+assert.ok(!nodes(screenTree).some((node) => node.type === 'Text' && node.props.children === 'Hot songs'))
+const playlistHandler = nodes(screenTree).find((node) => node.type === 'TouchableOpacity').props.onPress
+playlistHandler()
+assert.equal(screenNavigation.at(-1).params.id, 'popular-list')
+const beforeCategoryNavigation = screenNavigation.length
+selectCategory('find.artists')
+playlistHandler()
+assert.equal(screenNavigation.length, beforeCategoryNavigation, 'Old playlist clicks are blocked during category change')
+renderScreen()
+assert.equal(hotEnable.get('songs'), false)
+assert.equal(hotEnable.get('playlists'), false)
+assert.ok(!nodes(screenTree).some((node) => node.type === 'TouchableOpacity' || node.type === 'TracksListItem'))
+selectCategory('Albums')
+renderScreen()
+assert.ok(nodes(screenTree).some((node) => node.type === 'Text' && node.props.children === 'Enter a query'))
+assert.ok(!nodes(screenTree).some((node) => node.type === 'TouchableOpacity' || node.type === 'TracksListItem'))
+selectCategory('find.songs')
+renderScreen()
+await oldSongHandler(inventory[0])
+assert.equal(screenPlayback.length, beforeCategoryPlay, 'Category-away-and-back does not revive old song callbacks')
+console.log('PASS: songs/playlists/artist/album discovery separation, request gating and stale category clicks')
 
 if (process.argv.includes('--online')) {
 	const online = load('src/helpers/searchAll.ts', { ...imports, axios }).default

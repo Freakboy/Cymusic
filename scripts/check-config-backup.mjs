@@ -15,7 +15,7 @@ const backup = (extra = {}) => ({ schema: 'cymusic.config-backup', version: 1,
 	localSettings: { 'setting.basic.maxDownload': 3, 'setting.lyric.detailFontSize': 25 },
 	sources: [source()], playlists: [list()], favorites: [track()], ...extra })
 
-function fixture() {
+function fixture(globals = { URL, TextEncoder, Error }) {
 	const persisted = new Map([['music.progress', 99], ['music.play-list', [track({ id: 'queue-old' })]],
 		['music.musicItem', track({ id: 'current-old' })], ['music.selectedMusicApi', source()],
 		['music.importedLocalMusic', [track({ id: 'local-old', platform: 'local', url: 'file:///local.mp3' })]]])
@@ -43,6 +43,8 @@ function fixture() {
 	let shareMode = 'success'
 	let shareCallbacks
 	let writeFailure = false
+	let cleanupFailure = false
+	let cacheDirectory = 'file:///cache/'
 	const calls = []
 	const helper = loadModule('src/helpers/configBackup.ts', {
 		'@/store/PersistStatus': { get: key => persisted.get(key) ?? null, set: (key, value) => {
@@ -64,10 +66,10 @@ function fixture() {
 		'@/helpers/sourceManagement': { assertSourceIdle: message => { if (busy) throw new Error(message) } },
 		'@/player/sourceResolver/runtime': { withSourceRuntimeLock: async callback => { calls.push(['lock']); return callback() },
 			releaseResolverRuntime: () => calls.push(['release']) },
-		'expo-file-system/legacy': { cacheDirectory: 'file:///cache/', getInfoAsync: async () => info,
+		'expo-file-system/legacy': { get cacheDirectory() { return cacheDirectory }, getInfoAsync: async () => info,
 			readAsStringAsync: async uri => { calls.push(['read', uri]); return pickedJson },
 			writeAsStringAsync: async (uri, json) => { calls.push(['write', uri, json]); if (writeFailure) throw new Error('write failure') },
-			deleteAsync: async (uri, options) => { calls.push(['delete', uri, options]) } },
+			deleteAsync: async (uri, options) => { calls.push(['delete', uri, options]); if (cleanupFailure) throw new Error('SECRET cleanup') } },
 		'expo-document-picker': { getDocumentAsync: async options => { calls.push(['pick', options]); return picker } },
 		'react-native': { Platform: { get OS() { return platform } }, ActionSheetIOS: {
 			showShareActionSheetWithOptions: (options, failure, success) => {
@@ -78,7 +80,7 @@ function fixture() {
 				else if (shareMode !== 'pending') success(shareMode === 'success', 'fixture.activity')
 			},
 		} },
-	}, { URL, TextEncoder, Error })
+	}, globals)
 	return { helper, persisted, stores, writes, calls,
 		get favorites() { return favorites }, get localMemory() { return localMemory }, get localDisk() { return localDisk },
 		set busy(value) { busy = value }, set failKey(value) { failKey = value }, set failStorage(value) { failStorage = value },
@@ -86,8 +88,83 @@ function fixture() {
 		set platform(value) { platform = value }, set shareMode(value) { shareMode = value },
 		get shareCallbacks() { return shareCallbacks }, set writeFailure(value) { writeFailure = value },
 		set localMemory(value) { localMemory = value },
+		set cleanupFailure(value) { cleanupFailure = value }, set cacheDirectory(value) { cacheDirectory = value },
 	}
 }
+
+await check('real Config.setup empty/default payload and persisted lyric size index export successfully', async () => {
+	const { default: config } = loadModule('src/store/config.ts', {
+		immer: { produce: () => { throw new Error('unused') } }, react: { useEffect() {}, useState() {} },
+		'@/helpers/storage': { getStorage: async () => null, setStorage: async () => {} },
+	})
+	await config.setup()
+	assert.deepEqual(plain(config.get()), {})
+	const f = fixture()
+	f.localMemory = config.get()
+	// Actual persisted UI default/index, not a pixel size: components/lyric + app/player.
+	f.persisted.set('lyric.detailFontSize', 1)
+	const result = f.helper.parseConfigBackup(f.helper.serializeConfigBackup())
+	assert.equal(result.settings['lyric.detailFontSize'], 1)
+})
+
+await check('legacy artist arrays/numeric ids/missing metadata survive; one damaged song is isolated outbound only', () => {
+	const f = fixture()
+	f.stores.playListsStore.setValue([list({ songs: [track({ id: 42, artist: ['Alice', { name: 'Bob' }], album: null, duration: null }),
+		{ id: 'minimal', platform: 'QQ' }, null, track({ id: 'broken', duration: -1 })] }), list({ id: 'empty', songs: undefined })])
+	const result = f.helper.parseConfigBackup(f.helper.serializeConfigBackup())
+	assert.equal(result.playlists[0].songs.length, 2)
+	assert.equal(result.playlists[0].songs[0].artist, 'Alice, Bob')
+	assert.equal(result.playlists[0].songs[0].id, '42')
+	assert.equal(result.playlists[0].songs[1].title, '')
+	assert.equal(result.playlists[1].songs.length, 0)
+	assert.throws(() => f.helper.parseConfigBackup(JSON.stringify(backup({ favorites: [track({ artist: ['Alice'] })] }))))
+	assert.throws(() => f.helper.parseConfigBackup(JSON.stringify(backup({ favorites: [null] }))))
+})
+
+await check('invalid outbound settings are omitted while legitimate lyric indices and strict inbound types remain', () => {
+	for (const size of [0, 1, 2, 3]) {
+		const f = fixture()
+		f.persisted.set('lyric.detailFontSize', size)
+		f.persisted.set('music.autoCacheLocal', 'true')
+		f.localMemory = { setting: { basic: { maxDownload: '4', maxCacheSize: -1 } } }
+		const result = f.helper.parseConfigBackup(f.helper.serializeConfigBackup())
+		assert.equal(result.settings['lyric.detailFontSize'], size)
+		assert.equal(result.settings['music.autoCacheLocal'], undefined)
+		assert.equal(result.localSettings['setting.basic.maxCacheSize'], undefined)
+		assert.equal(result.localSettings['setting.basic.maxDownload'], 4)
+	}
+	for (const size of [-1, 4, 1.5, '1']) assert.throws(() => fixture().helper.parseConfigBackup(JSON.stringify(backup({ settings: { 'lyric.detailFontSize': size } }))))
+})
+
+await check('UTF-8 limits work without TextEncoder including multibyte, astral and lone surrogate characters', () => {
+	const f = fixture({ URL, Error, TextEncoder: undefined })
+	assert.ok(f.helper.parseConfigBackup(f.helper.serializeConfigBackup()))
+	for (const character of ['中', '😀', '\ud800']) {
+		const bytes = new TextEncoder().encode(character).length
+		const script = character.repeat(Math.floor(f.helper.CONFIG_BACKUP_LIMITS.script / bytes))
+		assert.ok(f.helper.parseConfigBackup(JSON.stringify(backup({ sources: [source({ script })] }))))
+		assert.throws(() => f.helper.parseConfigBackup(JSON.stringify(backup({ sources: [source({ script: script + character })] }))))
+	}
+})
+
+await check('export diagnostics identify safe stages and cleanup does not mask the primary failure', async () => {
+	for (const stage of ['cache', 'collect', 'validate', 'write', 'share', 'cleanup']) {
+		const f = fixture()
+		if (stage === 'cache') f.cacheDirectory = null
+		if (stage === 'collect') f.localMemory = null
+		if (stage === 'validate') f.stores.musicApiStore.setValue(Array.from({ length: 30 }, (_, i) => source({ id: `s${i}`, script: 'x'.repeat(400000) })))
+		if (stage === 'write') { f.writeFailure = true; f.cleanupFailure = true }
+		if (stage === 'share') { f.shareMode = 'error'; f.cleanupFailure = true }
+		if (stage === 'cleanup') f.cleanupFailure = true
+		await assert.rejects(f.helper.shareConfigBackup(), error => {
+			assert.equal(f.helper.configBackupExportStage(error), stage)
+			assert.equal(error.message, `CONFIG_BACKUP_EXPORT_${stage.toUpperCase()}`)
+			assert.equal(error.message.includes('SECRET'), false)
+			return true
+		})
+		if (['cache', 'collect', 'validate'].includes(stage)) assert.equal(f.calls.some(([type]) => type === 'write'), false)
+	}
+})
 
 await check('export whitelists both settings stores; excludes runtime, URLs, headers, caches and device files', () => {
 	const f = fixture()
@@ -239,7 +316,7 @@ await check('invalid input and source busy cannot apply; write failure rolls bac
 	await assert.rejects(f.helper.applyConfigBackup(backup(), 'busy'), /local storage failure/)
 	assert.equal(f.stores.playListsStore.getValue(), old)
 	f.localMemory = null
-	assert.throws(() => f.helper.serializeConfigBackup(), /initialized/)
+	assert.throws(() => f.helper.serializeConfigBackup(), /CONFIG_BACKUP_EXPORT_COLLECT/)
 	await assert.rejects(f.helper.applyConfigBackup(backup(), 'busy'), /initialized/)
 })
 
@@ -273,7 +350,7 @@ await check('iOS shares a validated local JSON file; success, cancellation, call
 	for (const mode of ['success', 'cancel', 'error', 'throw']) {
 		const f = fixture()
 		f.shareMode = mode
-		if (mode === 'error' || mode === 'throw') await assert.rejects(f.helper.shareConfigBackup(), /share failure|native throw/)
+		if (mode === 'error' || mode === 'throw') await assert.rejects(f.helper.shareConfigBackup(), /CONFIG_BACKUP_EXPORT_SHARE/)
 		else assert.equal(await f.helper.shareConfigBackup(), mode === 'success', 'cancel is false, never reported as success')
 		const write = f.calls.find(([type]) => type === 'write')
 		const share = f.calls.find(([type]) => type === 'share')
@@ -301,7 +378,7 @@ await check('sensitive session file survives until the native callback; file fai
 		assert.equal(settled, false)
 		assert.equal(f.calls.some(([type]) => type === 'delete'), false)
 		if (mode === 'error') {
-			const rejected = assert.rejects(observed, /callback failed/)
+			const rejected = assert.rejects(observed, /CONFIG_BACKUP_EXPORT_SHARE/)
 			f.shareCallbacks.failure(new Error('callback failed'))
 			await rejected
 		} else {
@@ -312,7 +389,7 @@ await check('sensitive session file survives until the native callback; file fai
 	}
 	const failed = fixture()
 	failed.writeFailure = true
-	await assert.rejects(failed.helper.shareConfigBackup(), /write failure/)
+	await assert.rejects(failed.helper.shareConfigBackup(), /CONFIG_BACKUP_EXPORT_WRITE/)
 	assert.equal(failed.calls.some(([type]) => type === 'share'), false)
 	assert.equal(failed.calls.filter(([type]) => type === 'delete').length, 1)
 	for (const platform of ['android', 'web']) {
@@ -443,6 +520,18 @@ await check('rendered export cancellation stays silent and non-iOS export shows 
 		}
 		assert.equal(ui.button(ui.render(), 'export').props.disabled, false)
 	}
+})
+
+await check('rendered export failure shows localized safe stage instead of native exception details', async () => {
+	const f = fixture()
+	f.shareMode = 'error'
+	const ui = settingsFixture(f)
+	ui.button(ui.render(), 'export').props.onPress()
+	ui.alerts[0][2].find(action => action.text === 'Continue sharing').onPress()
+	await flush()
+	await flush()
+	assert.match(ui.alerts[1][1], /iOS file sharing failed.*\[SHARE\]/)
+	assert.equal(ui.alerts[1][1].includes('share failure'), false)
 })
 
 finish()

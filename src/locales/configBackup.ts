@@ -1,6 +1,8 @@
 import { nowLanguage } from '@/utils/i18n'
 
 const zh = {
+	exportStages: { COLLECT: '无法整理配置，请检查音源或歌单数据。', VALIDATE: '导出内容校验失败或超过备份限制。',
+		CACHE: '缓存目录不可用。', WRITE: '无法写入配置文件，请检查存储空间。', SHARE: 'iOS 文件分享失败，请重试或检查运行环境。', CLEANUP: '临时备份清理失败，缓存中可能仍有敏感文件。' },
 	section: '配置备份', export: '导出配置 JSON', import: '导入配置 JSON',
 	exportTitle: '分享配置备份',
 	exportUnsupported: '配置 JSON 文件导出目前仅支持 iOS；Android 导出暂未实现。不会将配置作为文本分享。',
@@ -14,6 +16,8 @@ const zh = {
 	busy: '音源正在加载或测试，请结束后再导入配置。',
 }
 const en: typeof zh = {
+	exportStages: { COLLECT: 'Could not collect configuration; check sources and playlists.', VALIDATE: 'Export validation failed or backup limits were exceeded.',
+		CACHE: 'Cache directory unavailable.', WRITE: 'Could not write backup; check available storage.', SHARE: 'iOS file sharing failed; retry or check the runtime environment.', CLEANUP: 'Temporary backup cleanup failed; sensitive files may remain in cache.' },
 	section: 'Configuration backup', export: 'Export configuration JSON', import: 'Import configuration JSON',
 	exportTitle: 'Share configuration backup',
 	exportUnsupported: 'Configuration JSON file export is currently iOS-only. Android export is deferred; configuration will not be shared as text.',

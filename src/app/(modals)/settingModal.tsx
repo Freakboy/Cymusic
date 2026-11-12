@@ -406,9 +406,10 @@ const SettingModal = () => {
 	}
 
 	const backupError = (error: unknown) => {
+		const stage = error instanceof Error ? error.message.match(/^CONFIG_BACKUP_EXPORT_(COLLECT|VALIDATE|CACHE|WRITE|SHARE|CLEANUP)$/)?.[1] : undefined
 		Alert.alert(backupText.error, error instanceof Error && error.message === backupText.busy
 			? backupText.busy : error instanceof Error && error.message === CONFIG_BACKUP_EXPORT_UNSUPPORTED
-				? backupText.exportUnsupported : backupText.errorMessage)
+				? backupText.exportUnsupported : stage ? `${backupText.exportStages[stage as keyof typeof backupText.exportStages]} [${stage}]` : backupText.errorMessage)
 	}
 	const handleConfigBackup = async (action: 'import' | 'export') => {
 		if (backupActive.current) return

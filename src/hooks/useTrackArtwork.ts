@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useFlashListContext } from '@shopify/flash-list'
 import { unknownTrackImageUri } from '@/constants/images'
 import { ArtworkTrack, repairNeteaseArtwork, updateTrackArtwork } from '@/helpers/neteaseArtwork'
@@ -36,6 +36,7 @@ export function useTrackArtwork(
 	const [retry, setRetry] = useState(0)
 	const imageToken = `${identity}:${displayed.uri ?? ''}`
 	const activeImage = useRef(imageToken)
+	const deadline = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 	activeImage.current = imageToken
 	useEffect(() => {
 		activeImage.current = imageToken
@@ -54,6 +55,36 @@ export function useTrackArtwork(
 		return () => clearInterval(timer)
 	}, [list, current, id, platform, visibilityKey])
 
+	const failImage = useCallback(() => {
+		if (!displayed.uri || activeImage.current !== imageToken) return
+		activeImage.current = ''
+		attempt.current.failed.add(displayed.uri)
+		if (attempt.current.confirmed === displayed.uri) attempt.current.confirmed = ''
+		setState({ identity, uri: undefined })
+	}, [displayed.uri, identity, imageToken])
+	useEffect(() => {
+		if (!visible || !displayed.uri || !/^https?:/.test(displayed.uri) || !neteaseArtworkKey({ id, platform }) || attempt.current.confirmed === displayed.uri) return
+		deadline.current = setTimeout(() => {
+			if (current || isVisibleTrack({ id, platform }, list)) failImage()
+		}, 8000)
+		return () => { clearTimeout(deadline.current); deadline.current = undefined }
+	}, [imageToken, displayed.uri, failImage, visible, current, list, id, platform])
+
+	// Race exact-ID metadata against local CDN candidates, never against a successful image.
+	const failedImage = attempt.current.failed.size > 0
+	useEffect(() => {
+		if (!visible || !failedImage || !neteaseArtworkKey({ id, platform })) return
+		const session = attempt.current
+		let cancelled = false
+		const isActive = () => !cancelled && attempt.current === session && (current || isVisibleTrack({ id, platform }, list))
+		void repairNeteaseArtwork({ id, platform, artwork }, [...session.failed], { detailOnly: true, isActive }).then(result => {
+			if (!isActive() || (session.confirmed && !session.failed.has(session.confirmed))) return
+			const candidate = result.candidates?.find(uri => !session.failed.has(uri))
+			if (candidate) setState({ identity, uri: candidate })
+		})
+		return () => { cancelled = true }
+	}, [visible, failedImage, identity, retry, current, list, id, platform, artwork])
+
 	useEffect(() => {
 		const session = attempt.current
 		if (!visible) { session.exhausted = false; session.retries = 0; session.failed.clear(); return }
@@ -61,7 +92,9 @@ export function useTrackArtwork(
 		if (!current && !isVisibleTrack({ id, platform }, list)) return
 		let cancelled = false
 		let timer: ReturnType<typeof setTimeout> | undefined
-		void repairNeteaseArtwork({ id, platform, artwork }, [...session.failed]).then(result => {
+		void repairNeteaseArtwork({ id, platform, artwork }, [...session.failed], {
+			isActive: () => !cancelled && attempt.current === session && (current || isVisibleTrack({ id, platform }, list)),
+		}).then(result => {
 			if (cancelled || attempt.current !== session) return
 			session.exhausted = !result.artwork
 			setState({ identity, uri: result.artwork || undefined })
@@ -82,13 +115,11 @@ export function useTrackArtwork(
 		: unknownTrackImageUri
 	return {
 		source: { uri },
-		onError: () => {
-			if (!displayed.uri || activeImage.current !== imageToken) return
-			attempt.current.failed.add(displayed.uri)
-			setState({ identity, uri: undefined })
-		},
+		onError: failImage,
 		onLoad: () => {
 			if (!track || !displayed.uri || activeImage.current !== imageToken) return
+			clearTimeout(deadline.current)
+			deadline.current = undefined
 			if (attempt.current.confirmed !== displayed.uri) {
 				attempt.current.confirmed = displayed.uri
 				updateTrackArtwork(track, displayed.uri)

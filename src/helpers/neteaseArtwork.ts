@@ -30,20 +30,32 @@ export function neteaseArtworkCandidates(artwork?: string): string[] {
 
 type DetailResult = { expires: number; urls: string[] }
 const inFlight = new Map<string, Promise<DetailResult>>()
+const demand = new Map<string, (() => boolean)[]>()
 const cache = new Map<string, { expires: number; urls: string[] }>()
 const waiting: (() => void)[] = []
 let running = 0
 
-function detailArtwork(id: string): Promise<DetailResult> {
+function detailArtwork(id: string, isActive: () => boolean = () => true): Promise<DetailResult> {
 	const cached = cache.get(id)
 	if (cached && cached.expires > Date.now()) return Promise.resolve(cached)
 	const pending = inFlight.get(id)
-	if (pending) return pending
+	if (pending) { demand.get(id)?.push(isActive); return pending }
+	if (!isActive()) return Promise.resolve({ urls: [], expires: Date.now() + 1000 })
 	if (waiting.length >= 32) return Promise.resolve({ urls: [], expires: Date.now() + 1000 })
+	const consumers = [isActive]
+	demand.set(id, consumers)
 	const task = new Promise<DetailResult>((resolve) => {
 		const run = async () => {
+			if (!consumers.some(active => active())) {
+				inFlight.delete(id)
+				demand.delete(id)
+				resolve({ urls: [], expires: Date.now() + 1000 })
+				waiting.shift()?.()
+				return
+			}
 			running++
 			let urls: string[] = []
+			let transient = false
 			try {
 				const data = await requestJson(`https://music.163.com/api/song/detail?ids=${encodeURIComponent(`[${id}]`)}`)
 				const song = data?.songs?.find((item: any) => String(item?.id) === id)
@@ -51,17 +63,18 @@ function detailArtwork(id: string): Promise<DetailResult> {
 					// A syntactically valid picUrl can still contain an obsolete ID/hash.
 					const albums = [song.al, song.album]
 					urls = [...new Set([
+						...albums.map(album => neteaseImage(album?.pic_str, album?.picId_str, album?.picId, album?.pic)),
 						normalizeNeteaseSong(song).artwork,
-						...albums.flatMap(album => [album?.picUrl,
-							neteaseImage(album?.pic_str, album?.picId_str, album?.picId, album?.pic)]),
+						...albums.map(album => album?.picUrl),
 					].flatMap(neteaseArtworkCandidates))].slice(0, 16)
 				}
-			} catch { /* Negative cache prevents repeated visible-row retries. */ }
+			} catch { transient = true }
 			cache.delete(id)
-			const result = { expires: Date.now() + (urls.length ? 300000 : 60000), urls }
+			const result = { expires: Date.now() + (urls.length ? 300000 : transient ? 5000 : 60000), urls }
 			cache.set(id, result)
 			if (cache.size > 128) cache.delete(cache.keys().next().value!)
 			inFlight.delete(id)
+			demand.delete(id)
 			running--
 			resolve(result)
 			waiting.shift()?.()
@@ -73,29 +86,38 @@ function detailArtwork(id: string): Promise<DetailResult> {
 	return task
 }
 
-/** Call only for a visible/current track. Exhaust local candidates before detail I/O. */
+/** Call only for a visible/current track. Detail can race local CDN recovery after first failure. */
 export async function repairNeteaseArtwork(
 	track: ArtworkTrack,
 	failed: readonly string[] = [],
+	options: { detailOnly?: boolean; isActive?: () => boolean } = {},
 ): Promise<ArtworkRepairResult> {
 	if (!neteaseArtworkKey(track)) return { artwork: '' }
-	let candidates = neteaseArtworkCandidates(track.artwork).filter(url => !failed.includes(url))
+	let candidates = options.detailOnly ? [] : neteaseArtworkCandidates(track.artwork).filter(url => !failed.includes(url))
 	if (!candidates.length) {
-		const detail = await detailArtwork(String(track.id))
+		const detail = await detailArtwork(String(track.id), options.isActive)
 		candidates = detail.urls.filter(url => !failed.includes(url))
-		if (!candidates.length) return { artwork: '', candidates, retryable: true, retryAt: detail.expires }
+		if (!candidates.length) {
+			// Download failures invalidate positive candidate cache, not persisted verified artwork.
+			if (detail.urls.length) {
+				const rejected = { urls: [], expires: Date.now() + 5000 }
+				cache.set(String(track.id), rejected)
+				return { artwork: '', candidates, retryable: true, retryAt: rejected.expires }
+			}
+			return { artwork: '', candidates, retryable: true, retryAt: detail.expires }
+		}
 	}
 	return { artwork: candidates[0] || '', candidates }
 }
 
-const updates = new Map<string, string>()
+const updates = new Map<string, { artwork: string; previousVerified?: string; previousArtwork?: string }>()
 let persistTimer: ReturnType<typeof setTimeout> | undefined
 
 /** Enqueue only artwork confirmed by Image.onLoad (or a verified image response). */
 export function updateTrackArtwork(track: ArtworkTrack, artwork: string): void {
 	const key = neteaseArtworkKey(track)
 	if (!key || !usableArtwork(artwork) || (track.artwork === artwork && track.verifiedArtwork === artwork)) return
-	updates.set(key, artwork)
+	updates.set(key, { artwork, previousVerified: track.verifiedArtwork, previousArtwork: track.artwork })
 	if (persistTimer === undefined) persistTimer = setTimeout(flushTrackArtworkUpdates, 250)
 }
 
@@ -108,7 +130,10 @@ export function flushTrackArtworkUpdates(): void {
 	updates.clear()
 	const patch = <T extends ArtworkTrack>(track: T): T => {
 		const key = neteaseArtworkKey(track)
-		const artwork = key ? batch.get(key) : undefined
+		const update = key ? batch.get(key) : undefined
+		if (track.verifiedArtwork && track.verifiedArtwork !== update?.previousVerified &&
+			track.verifiedArtwork !== update?.previousArtwork && track.verifiedArtwork !== update?.artwork) return track
+		const artwork = update?.artwork
 		return artwork && (artwork !== track.artwork || artwork !== track.verifiedArtwork)
 			? { ...track, artwork, verifiedArtwork: artwork } : track
 	}

@@ -31,9 +31,10 @@ let hotQueueRevision = 0
 const SearchlistsScreen = () => {
 	const text = useSourceSearchText()
 	const [search, setSearch] = useState('')
+	const [searchType, setSearchType] = useState<SearchType>('songs')
 	const discoveryText = useSearchDiscoveryText()
-	const hotSongs = useSearchHot('songs', !search.trim())
-	const hotPlaylists = useSearchHot('playlists', !search.trim())
+	const hotSongs = useSearchHot('songs', !search.trim() && searchType === 'songs')
+	const hotPlaylists = useSearchHot('playlists', !search.trim() && searchType === 'playlists')
 	// Batched A -> B -> A edits still need a fresh request generation.
 	const [revision, setRevision] = useState(0)
 	const input = useRef('')
@@ -49,16 +50,18 @@ const SearchlistsScreen = () => {
 	const [isLoading, setIsLoading] = useState(false)
 	const [hasMore, setHasMore] = useState(false)
 	const searchRequestRef = useRef(0)
-	const [searchType, setSearchType] = useState<SearchType>('songs')
 	const slideAnim = useRef(new Animated.Value(0)).current
 	const { setActiveQueueId } = useQueue()
 	const latestHotSongs = useRef(hotSongs.tracks)
 	latestHotSongs.current = hotSongs.tracks
+	const latestHotPlaylists = useRef(hotPlaylists.tracks)
+	latestHotPlaylists.current = hotPlaylists.tracks
 	const hotInteractionGeneration = useRef(0)
 	const hotGeneration = hotInteractionGeneration.current
 	const selectHotSong = async (track: Track) => {
 		// Include synchronous input intent: cached rows can fire before the next render.
 		if (
+			searchType !== 'songs' ||
 			search.trim() ||
 			input.current.trim() ||
 			hotGeneration !== hotInteractionGeneration.current ||
@@ -83,6 +86,13 @@ const SearchlistsScreen = () => {
 		} catch (cause) {
 			Alert.alert(discoveryText.failed, cause instanceof Error ? cause.message : String(cause))
 		}
+	}
+	const selectHotPlaylist = (track: Track) => {
+		if (searchType !== 'playlists' || search.trim() || input.current.trim() ||
+			hotGeneration !== hotInteractionGeneration.current || latestHotPlaylists.current !== hotPlaylists.tracks ||
+			!hotPlaylists.tracks.some((item) => item.id === track.id)) return
+		router.navigate({ pathname: '/(tabs)/search/collection',
+			params: { kind: 'playlists', id: track.id, title: track.title } })
 	}
 	useEffect(() => {
 		Animated.spring(slideAnim, {
@@ -180,6 +190,7 @@ const SearchlistsScreen = () => {
 
 	const handleSearchTypeChange = (type: SearchType) => {
 		if (type === searchType) return
+		++hotInteractionGeneration.current
 		++searchRequestRef.current
 		pending.current = true
 		controller.current?.abort()
@@ -257,7 +268,7 @@ const SearchlistsScreen = () => {
 								['songs', hotSongs],
 								['playlists', hotPlaylists],
 							] as const
-						).map(([kind, section]) => (
+						).filter(([kind]) => kind === searchType).map(([kind, section]) => (
 							<View key={kind} style={{ marginBottom: 24 }}>
 								<Text style={{ color: colors.text, fontSize: 18, marginBottom: 12 }}>
 									{discoveryText[kind]}
@@ -288,12 +299,7 @@ const SearchlistsScreen = () => {
 												minHeight: 60,
 												marginBottom: 18,
 											}}
-											onPress={() =>
-												router.navigate({
-													pathname: '/(tabs)/search/collection',
-													params: { kind: 'playlists', id: track.id, title: track.title },
-												})
-											}
+											onPress={() => selectHotPlaylist(track)}
 										>
 											<Image
 												source={{ uri: track.artwork }}
@@ -307,6 +313,8 @@ const SearchlistsScreen = () => {
 								)}
 							</View>
 						))}
+						{(searchType === 'artists' || searchType === 'albums') &&
+							<Text style={{ color: colors.textMuted }}>{text.prompt}</Text>}
 					</ScrollView>
 				)}
 			</View>

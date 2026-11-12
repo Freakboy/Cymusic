@@ -93,6 +93,7 @@ await check('detail keeps both legacy album and modern al picID alternatives eve
 	const result = await f.helper.repairNeteaseArtwork(track('2010', stale), failed)
 	assert.ok(result.candidates.some(url => url.endsWith('/109951170012345678.jpg')))
 	assert.ok(result.candidates.some(url => url.endsWith('/109951170012345679.jpg')))
+	assert.ok(result.artwork.endsWith('/109951170012345678.jpg'), 'exact detail picID precedes stale picUrl hosts')
 	assert.ok(result.candidates.every(url => !failed.includes(url)))
 })
 await check('shared requests deduplicate, run max two, and bound a 2000-item flood to 34 tasks', async () => {
@@ -175,6 +176,11 @@ function hookFixture(f, initial = track(), options = {}) {
 	let output
 	const effects = []
 	const react = {
+		useCallback(callback, deps) {
+			const index = cursor++, before = slots[index]
+			if (!before || deps.some((dep, i) => !Object.is(dep, before.deps[i]))) slots[index] = { deps, callback }
+			return slots[index].callback
+		},
 		useState(initial) {
 			const index = cursor++
 			slots[index] ??= { value: initial }
@@ -431,14 +437,14 @@ await check('a visible target rejected by the full 2+32 queue retries after slot
 })
 
 await check('visible offline/empty details recover after negative TTL without leaving the screen', async () => {
-	for (const failure of [() => { throw new Error('offline') }, () => ({ songs: [] })]) {
+	for (const [ttl, failure] of [[5000, () => { throw new Error('offline') }], [60000, () => ({ songs: [] })]]) {
 		let recovered = false
 		const f = fixture(() => recovered ? { songs: [{ id: 2010, album: { picUrl: 'https://example.com/recovered.jpg' } }] } : failure())
 		const h = hookFixture(f)
 		h.render()
 		await h.settle()
 		assert.equal(f.calls.length, 1)
-		f.clock.advance(59999)
+		f.clock.advance(ttl - 1)
 		h.render()
 		assert.equal(f.calls.length, 1)
 		recovered = true
@@ -516,7 +522,7 @@ await check('changing identity or unmounting cancels a pending visible retry', a
 		if (action === 'recycle') {
 			h.track = track('999', 'https://example.com/999.jpg')
 			h.render()
-			assert.equal(f.clock.pending, 1, 'old identity retry removed')
+			assert.equal(f.clock.pending, 2, 'old identity retry removed; new image deadline plus visibility remain')
 		}
 		h.unmount()
 		assert.equal(f.clock.pending, 0)
@@ -526,4 +532,101 @@ await check('changing identity or unmounting cancels a pending visible retry', a
 	}
 })
 
+await check('stale CDN failure starts exact-ID detail immediately rather than serially exhausting eight hosts', async () => {
+	const f = fixture(), h = hookFixture(f, track('2010', 'https://p1.music.126.net/wrong/123.jpg'))
+	const start = f.clock.now
+	h.render().onError(); h.render()
+	await h.settle()
+	assert.equal(f.calls.length, 1, 'exact-ID request must start on first image failure at t=0')
+	assert.ok(h.render().source.uri.includes('109951170012345678'))
+	console.log(`TIMING first failure -> detail start: ${f.clock.now - start}ms`)
+	h.unmount()
+})
+await check('visible image with neither onLoad nor onError has a bounded loading deadline', async () => {
+	const f = fixture(), h = hookFixture(f, track('2010', 'https://p1.music.126.net/wrong/123.jpg'))
+	const stale = h.render()
+	f.clock.advance(8000); h.render(); await h.settle()
+	assert.equal(f.calls.length, 1, 'silent native image must recover within 8s')
+	assert.notEqual(h.render().source.uri, stale.source.uri)
+	stale.onLoad(); f.clock.advance(250)
+	assert.equal(f.writes.length, 0, 'late timed-out image cannot persist')
+	h.unmount()
+})
+await check('transient 503 detail retries in five seconds rather than empty-album one-minute TTL', async () => {
+	let online = false
+	const f = fixture(() => online ? { songs: [{ id: 2010, album: { picUrl: 'https://example.com/recovered.jpg' } }] } : { ok: false, status: 503, text: async () => '' })
+	const h = hookFixture(f); h.render(); await h.settle()
+	online = true; f.clock.advance(5000); h.render(); await h.settle()
+	assert.equal(f.calls.length, 2)
+	assert.equal(h.render().source.uri, 'https://example.com/recovered.jpg')
+	h.unmount()
+})
+await check('successful original image cancels deadline and never starts detail; fast CDN success beats pending detail', async () => {
+	const gate = deferred(), f = fixture(() => gate.promise)
+	const original = track('2010', 'https://p1.music.126.net/wrong/123.jpg')
+	const good = hookFixture(f, original)
+	good.render().onLoad(); f.clock.advance(8000); good.render()
+	assert.equal(f.calls.length, 0); good.unmount()
+	const h = hookFixture(f, original)
+	h.render().onError(); h.render(); await h.settle()
+	const candidate = h.render(); candidate.onLoad()
+	gate.resolve({ songs: [{ id: 2010, album: { picUrl: 'https://example.com/detail.jpg' } }] })
+	await h.settle()
+	assert.equal(h.render().source.uri, candidate.source.uri)
+	h.unmount()
+})
+await check('failed verified URI may persist a new successful candidate, but never clobbers a newer verified store marker', async () => {
+	const f = fixture(), original = { ...track('2010', 'https://p1.music.126.net/wrong/123.jpg'), verifiedArtwork: 'https://p1.music.126.net/wrong/123.jpg' }
+	f.stores.importedLocalMusicStore.setValue([original])
+	const h = hookFixture(f, original)
+	h.render().onError(); h.render(); await h.settle()
+	const candidate = h.render(); assert.notEqual(candidate.source.uri, original.artwork)
+	assert.equal(f.writes.length, 0)
+	candidate.onLoad(); f.clock.advance(250)
+	assert.equal(f.stores.importedLocalMusicStore.getValue()[0].verifiedArtwork, candidate.source.uri)
+	f.helper.updateTrackArtwork(original, 'https://example.com/late.jpg')
+	f.clock.advance(250)
+	assert.equal(f.stores.importedLocalMusicStore.getValue()[0].verifiedArtwork, candidate.source.uri)
+	h.unmount()
+})
+await check('queued detail for a now-hidden/unmounted cell never starts network when slots release', async () => {
+	for (const action of ['hidden', 'unmount']) {
+		const gate = deferred(), f = fixture(() => gate.promise)
+		const pending = [f.helper.repairNeteaseArtwork(track('3000')), f.helper.repairNeteaseArtwork(track('3001'))]
+		const h = hookFixture(f); h.render(); await h.settle()
+		assert.equal(f.calls.length, 2)
+		if (action === 'hidden') { h.visible = false; f.clock.advance(500); h.render() }
+		else h.unmount()
+		gate.resolve({ songs: [] }); await Promise.all(pending); await flush()
+		assert.equal(f.calls.length, 2)
+		if (action === 'hidden') h.unmount()
+	}
+})
+await check('exhausted candidate cache and three-round budget do not freeze recovery on a new mount', async () => {
+	let recovered = false
+	const f = fixture(() => recovered ? { songs: [{ id: 2010, album: { picUrl: 'https://example.com/new.jpg' } }] } : { songs: [] })
+	const h = hookFixture(f); h.render(); await h.settle()
+	for (let round = 0; round < 3; round++) { f.clock.advance(60000); h.render(); await h.settle() }
+	assert.equal(f.calls.length, 3); h.unmount(); recovered = true
+	const next = hookFixture(f); next.render(); await next.settle()
+	assert.equal(next.render().source.uri, 'https://example.com/new.jpg'); next.unmount()
+	const f2 = fixture(), all = await f2.helper.repairNeteaseArtwork(track())
+	const rejected = await f2.helper.repairNeteaseArtwork(track(), all.candidates)
+	assert.equal(rejected.retryAt - f2.clock.now, 5000, 'failed positive candidates no longer freeze detail for 5min')
+	f2.clock.advance(5000); await f2.helper.repairNeteaseArtwork(track())
+	assert.equal(f2.calls.length, 2)
+})
+await check('silent images exhaust finite candidates/three rounds, hidden cells have no image deadline', async () => {
+	const f = fixture(), h = hookFixture(f, track('2010', 'https://p1.music.126.net/wrong/123.jpg'))
+	h.render()
+	for (let n = 0; n < 70; n++) { f.clock.advance(8000); h.render(); await h.settle() }
+	assert.equal(h.render().source.uri, 'asset:default')
+	assert.equal(f.calls.length, 3)
+	const calls = f.calls.length
+	f.clock.advance(300000); h.render(); await h.settle()
+	assert.equal(f.calls.length, calls); h.unmount(); assert.equal(f.clock.pending, 0)
+	const f2 = fixture(), hidden = hookFixture(f2, track('2010', 'https://p1.music.126.net/wrong/123.jpg'))
+	hidden.visible = false; hidden.render(); f2.clock.advance(20000); hidden.render(); await hidden.settle()
+	assert.equal(f2.calls.length, 0); hidden.unmount()
+})
 finish()

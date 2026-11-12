@@ -22,7 +22,7 @@ const settingsRules = {
 	'music.bluetoothLyrics': 'boolean', 'music.preciseSeeking': 'boolean',
 	'music.isCachedIconVisible': 'boolean', 'music.songsNumsToLoad': [1, 2000],
 	'lyric.showTranslation': 'boolean', 'lyric.displayMode': ['original', 'bilingual', 'translation'],
-	'lyric.detailFontSize': [10, 80], 'lyric.delaySeconds': [-30, 30],
+	'lyric.detailFontSize': [0, 3], 'lyric.delaySeconds': [-30, 30],
 	'search.playbackMode': ['append', 'newplaylist'],
 } as const
 // local-config is a separate storage system. Only portable preferences, never status.*,
@@ -61,6 +61,29 @@ export type ConfigBackup = {
 }
 
 function invalid(): never { throw new Error('Invalid or unsupported configuration backup') }
+// UTF-8 byte count including replacement of lone surrogates; no RN global/polyfill required.
+function utf8Bytes(value: string): number {
+	let bytes = 0
+	for (let i = 0; i < value.length; i++) {
+		const code = value.charCodeAt(i)
+		if (code < 0x80) bytes++
+		else if (code < 0x800) bytes += 2
+		else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length
+			&& value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) { bytes += 4; i++ }
+		else bytes += 3
+	}
+	return bytes
+}
+export type ConfigBackupExportStage = 'collect' | 'validate' | 'cache' | 'write' | 'share' | 'cleanup'
+function exportFailure(stage: ConfigBackupExportStage): Error {
+	// Never include native error messages, payloads, paths, scripts or credentials.
+	return new Error(`CONFIG_BACKUP_EXPORT_${stage.toUpperCase()}`)
+}
+export function configBackupExportStage(error: unknown): ConfigBackupExportStage | null {
+	const message = error instanceof Error ? error.message : ''
+	const stage = message.match(/^CONFIG_BACKUP_EXPORT_(COLLECT|VALIDATE|CACHE|WRITE|SHARE|CLEANUP)$/)?.[1]
+	return stage ? stage.toLowerCase() as ConfigBackupExportStage : null
+}
 function object(value: unknown): Record<string, unknown> {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
 	return value as Record<string, unknown>
@@ -128,6 +151,20 @@ function song(value: unknown, strict: boolean): IMusic.IMusicItem | null {
 	return result
 }
 
+function outboundSong(value: unknown): IMusic.IMusicItem | null {
+	try {
+		const raw = { ...object(value) }
+		for (const key of ['id', 'songmid', 'albummid', 'strMediaMid'])
+			if (typeof raw[key] === 'number' && Number.isSafeInteger(raw[key]) && (raw[key] as number) >= 0) raw[key] = String(raw[key])
+		if (Array.isArray(raw.artist)) raw.artist = raw.artist.map(item =>
+			typeof item === 'string' ? item : typeof item?.name === 'string' ? item.name : '').filter(Boolean).join(', ')
+		for (const key of ['title', 'artist', 'album', 'artwork', 'verifiedArtwork'])
+			if (raw[key] === null) delete raw[key]
+		if (raw.duration === null) delete raw.duration
+		return song(raw, false)
+	} catch { return null } // One corrupt record must not destroy all collections.
+}
+
 function normalize(value: unknown, strict: boolean): ConfigBackup {
 	const raw = object(value)
 	keys(raw, ['schema', 'version', 'settings', 'localSettings', 'sources', 'playlists', 'favorites'], strict)
@@ -136,22 +173,25 @@ function normalize(value: unknown, strict: boolean): ConfigBackup {
 	keys(prefs, Object.keys(settingsRules), strict)
 	const settings: Settings = {}
 	for (const key of Object.keys(settingsRules) as SettingKey[]) {
+		try {
 		const value = prefs[key]
 		if (value === undefined) continue
 		const rule = settingsRules[key]
 		if (rule === 'boolean') settings[key] = boolean(value)
 		else if (typeof rule[0] === 'number') {
 			settings[key] = number(value, rule[0], rule[1] as number)
-			if (key === 'music.songsNumsToLoad' && !Number.isInteger(value)) invalid()
+			if (['music.songsNumsToLoad', 'lyric.detailFontSize'].includes(key) && !Number.isInteger(value)) invalid()
 		} else {
 			if (!(rule as readonly unknown[]).includes(value)) invalid()
 			settings[key] = value as string
 		}
+		} catch (error) { if (strict) throw error; delete settings[key] }
 	}
 	const localPrefs = object(raw.localSettings)
 	keys(localPrefs, Object.keys(localRules), strict)
 	const localSettings: ConfigBackup['localSettings'] = {}
 	for (const key of Object.keys(localRules) as LocalKey[]) {
+		try {
 		const value = localPrefs[key]
 		if (value === undefined) continue
 		const rule = localRules[key]
@@ -161,13 +201,14 @@ function normalize(value: unknown, strict: boolean): ConfigBackup {
 			if (!(rule as readonly unknown[]).includes(value)) invalid()
 			localSettings[key] = value as string
 		}
+		} catch (error) { if (strict) throw error; delete localSettings[key] }
 	}
 	let totalTracks = 0
 	const tracks = (value: unknown) => {
 		const items = array(value, CONFIG_BACKUP_LIMITS.tracks)
 		totalTracks += items.length
 		if (totalTracks > CONFIG_BACKUP_LIMITS.tracks) invalid()
-		return items.map(item => song(item, strict)).filter((item): item is IMusic.IMusicItem => !!item)
+		return items.map(item => strict ? song(item, true) : outboundSong(item)).filter((item): item is IMusic.IMusicItem => !!item)
 	}
 	const playlists = array(raw.playlists, CONFIG_BACKUP_LIMITS.playlists).map(value => {
 		const item = object(value)
@@ -176,7 +217,7 @@ function normalize(value: unknown, strict: boolean): ConfigBackup {
 		const result: IMusic.PlayList = {
 			id: identifier(item.id), platform: text(item.platform, 256), artist: text(item.artist),
 			title: text(item.title), name: text(item.name), description: text(item.description, 10000),
-			artwork: http(item.artwork, strict), coverImg: http(item.coverImg, strict), songs: tracks(item.songs),
+			artwork: http(item.artwork, strict), coverImg: http(item.coverImg, strict), songs: tracks(!strict && item.songs == null ? [] : item.songs),
 		}
 		if (item.customName !== undefined) result.customName = boolean(item.customName)
 		if (item.customCover !== undefined && result.coverImg) result.customCover = boolean(item.customCover)
@@ -199,7 +240,7 @@ function normalize(value: unknown, strict: boolean): ConfigBackup {
 		keys(item, ['id', 'name', 'author', 'version', 'script', 'scriptType', 'srcUrl', 'importUrl'], strict)
 		if (item.scriptType !== undefined && !['cymusic', 'lxmusic'].includes(String(item.scriptType))) invalid()
 		const script = text(item.script, CONFIG_BACKUP_LIMITS.script)
-		if (!script.trim() || new TextEncoder().encode(script).length > CONFIG_BACKUP_LIMITS.script) invalid()
+		if (!script.trim() || utf8Bytes(script) > CONFIG_BACKUP_LIMITS.script) invalid()
 		return { id: identifier(item.id), name: text(item.name), author: text(item.author), version: text(item.version),
 			script, scriptType: item.scriptType as 'cymusic' | 'lxmusic' | undefined,
 			srcUrl: http(item.srcUrl, strict), importUrl: http(item.importUrl, strict),
@@ -212,7 +253,7 @@ function normalize(value: unknown, strict: boolean): ConfigBackup {
 /** Strict inbound whitelist; nothing is evaluated, requested or written during preview. */
 export function parseConfigBackup(json: string): ConfigBackup {
 	if (typeof json !== 'string' || json.length > CONFIG_BACKUP_MAX_BYTES
-		|| new TextEncoder().encode(json).length > CONFIG_BACKUP_MAX_BYTES) invalid()
+		|| utf8Bytes(json) > CONFIG_BACKUP_MAX_BYTES) invalid()
 	return normalize(JSON.parse(json), true)
 }
 function portable(backup: ConfigBackup) {
@@ -221,6 +262,8 @@ function portable(backup: ConfigBackup) {
 		srcUrl: source.srcUrl, importUrl: source.importUrl })) }
 }
 export function serializeConfigBackup(): string {
+	let stage: ConfigBackupExportStage = 'collect'
+	try {
 	if (Config.get() === null) throw new Error('Configuration is not initialized')
 	const settings: Settings = {}
 	for (const key of Object.keys(settingsRules) as SettingKey[]) {
@@ -237,9 +280,11 @@ export function serializeConfigBackup(): string {
 		sources: stores.musicApiStore.getValue() ?? PersistStatus.get('music.musicApi') ?? [],
 		playlists: stores.playListsStore.getValue() ?? PersistStatus.get('music.playLists') ?? [],
 		favorites: useLibraryStore.getState().favorites }, false)
+	stage = 'validate'
 	const json = JSON.stringify(portable(backup), null, 2)
 	parseConfigBackup(json)
 	return json
+	} catch { throw exportFailure(stage) }
 }
 export function configBackupPreview(backup: ConfigBackup) {
 	return { settings: Object.keys(backup.settings).length, localSettings: Object.keys(backup.localSettings).length, sources: backup.sources.length,
@@ -311,17 +356,27 @@ export async function pickConfigBackup(): Promise<ConfigBackup | null> {
 }
 export async function shareConfigBackup(): Promise<boolean> {
 	if (Platform.OS !== 'ios') throw new Error(CONFIG_BACKUP_EXPORT_UNSUPPORTED)
-	if (!FileSystem.cacheDirectory) throw new Error('Cache directory is unavailable')
+	if (!FileSystem.cacheDirectory) throw exportFailure('cache')
 	const uri = `${FileSystem.cacheDirectory}cymusic-config-${Date.now()}.json`
+	const json = serializeConfigBackup()
+	let stage: ConfigBackupExportStage = 'write'
+	let failure: Error | undefined
+	let completed = false
 	try {
-		await FileSystem.writeAsStringAsync(uri, serializeConfigBackup())
+		await FileSystem.writeAsStringAsync(uri, json)
+		stage = 'share'
 		// RN loads this local file as a share attachment, not as JSON text. Keep the
 		// session file until either native completion callback (including cancel).
-		return await new Promise<boolean>((resolve, reject) => {
+		completed = await new Promise<boolean>((resolve, reject) => {
 			ActionSheetIOS.showShareActionSheetWithOptions({ url: uri, subject: 'CyMusic configuration backup' },
 				reject, completed => resolve(completed))
 		})
+	} catch {
+		failure = exportFailure(stage)
 	} finally {
-		await FileSystem.deleteAsync(uri, { idempotent: true })
+		try { await FileSystem.deleteAsync(uri, { idempotent: true }) }
+		catch { failure ??= exportFailure('cleanup') }
 	}
+	if (failure) throw failure
+	return completed
 }
